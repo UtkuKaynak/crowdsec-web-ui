@@ -2,6 +2,8 @@ import type {
   AddDecisionRequest,
   AlertRecord,
   ApiPermissionError,
+  AuditLogItem,
+  IpInvestigationResponse,
   BulkDeleteRequest,
   BulkDeleteResult,
   CleanupByIpRequest,
@@ -195,6 +197,26 @@ export async function addDecision(data: AddDecisionRequest): Promise<unknown> {
 
 export async function fetchConfig(): Promise<ConfigResponse> {
     return fetchJson<ConfigResponse>('/api/config', undefined, 'Failed to fetch config');
+}
+
+export async function fetchIpInvestigation(ip: string): Promise<IpInvestigationResponse> {
+    return fetchJson<IpInvestigationResponse>(
+        `/api/ip/${encodeURIComponent(ip)}`,
+        undefined,
+        'Failed to fetch IP investigation data',
+    );
+}
+
+export async function fetchAuditLogPaginated(
+    page = 1,
+    pageSize = 50,
+): Promise<PaginatedResponse<AuditLogItem>> {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    return fetchJson<PaginatedResponse<AuditLogItem>>(
+        `/api/audit-log?${params.toString()}`,
+        undefined,
+        'Failed to fetch audit log',
+    );
 }
 
 export async function updateTableColumns(data: UpdateTableColumnsRequest): Promise<{

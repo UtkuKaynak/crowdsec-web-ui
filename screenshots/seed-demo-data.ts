@@ -43,17 +43,69 @@ type DemoAlertOptions = {
   }>;
 };
 
+type DemoMetaEntry = { key: string; value: string | Array<{ key: string; value: string }> };
+
+function buildAlertMeta(alert: DemoAlertOptions): Array<{ key: string; value: string }> {
+  // Mimics CrowdSec "console context" (alert-level meta) the engine attaches
+  // when context.yaml is configured.
+  const meta = [
+    { key: 'source_ip', value: alert.ip },
+    { key: 'service', value: alert.target },
+    { key: 'machine', value: alert.machine },
+  ];
+  if (alert.scenario.includes('ssh')) {
+    meta.push({ key: 'target_user', value: 'root' });
+  }
+  if (alert.scenario.includes('http') || alert.scenario.includes('appsec')) {
+    meta.push({ key: 'http_host', value: alert.target });
+  }
+  return meta;
+}
+
 function buildEvents(alert: DemoAlertOptions) {
-  return Array.from({ length: Math.min(alert.eventsCount, 12) }, (_, index) => ({
-    timestamp: iso(alert.minutesAgo + index),
-    meta: [
+  const isAppsec = alert.scenario.includes('appsec');
+  const isHttp = isAppsec || alert.scenario.includes('http');
+
+  return Array.from({ length: Math.min(alert.eventsCount, 12) }, (_, index) => {
+    const meta: DemoMetaEntry[] = [
       { key: 'target_fqdn', value: alert.target },
       { key: 'service', value: alert.target },
-      { key: 'log_type', value: index % 2 === 0 ? 'auth' : 'access' },
-      { key: 'method', value: index % 2 === 0 ? 'password' : 'GET' },
-      { key: 'status', value: index % 2 === 0 ? 'failed' : '403' },
-    ],
-  }));
+      // Potentially-sensitive captured context (gated behind opt-in in the UI).
+      { key: 'context', value: [
+        { key: 'username', value: index % 2 === 0 ? 'root' : 'admin' },
+        { key: 'attempt', value: String(index + 1) },
+      ] },
+    ];
+
+    if (isHttp) {
+      // HTTP-style events exercise EventCard's request-line rendering.
+      meta.push(
+        { key: 'http_verb', value: index % 3 === 0 ? 'POST' : 'GET' },
+        { key: 'http_path', value: isAppsec ? '/index.php?page=../../../../etc/passwd' : `/wp-login.php?try=${index + 1}` },
+        { key: 'http_status', value: index % 2 === 0 ? '403' : '404' },
+        { key: 'http_user_agent', value: 'Mozilla/5.0 (compatible; Nmap Scripting Engine)' },
+      );
+
+      if (isAppsec) {
+        // AppSec/WAF events exercise the dedicated AppSec panel.
+        meta.push(
+          { key: 'matched_zones', value: 'URI' },
+          { key: 'rule_name', value: 'crowdsecurity/vpatch-CVE-2024-1709' },
+          { key: 'appsec_action', value: 'ban' },
+          { key: 'rule_ids', value: '90001' },
+          { key: 'msg', value: 'Path traversal attempt blocked by virtual patch' },
+        );
+      }
+    } else {
+      meta.push(
+        { key: 'log_type', value: 'auth' },
+        { key: 'method', value: 'password' },
+        { key: 'status', value: 'failed' },
+      );
+    }
+
+    return { timestamp: iso(alert.minutesAgo + index), meta };
+  });
 }
 
 function insertAlert(options: DemoAlertOptions) {
@@ -80,6 +132,7 @@ function insertAlert(options: DemoAlertOptions) {
     machine_alias: options.machine,
     events_count: options.eventsCount,
     events: buildEvents(options),
+    meta: buildAlertMeta(options),
     decisions,
     target: options.target,
     simulated: options.simulated === true,
@@ -101,6 +154,8 @@ function insertAlert(options: DemoAlertOptions) {
     $created_at: createdAt,
     $scenario: options.scenario,
     $source_ip: options.ip,
+    $as_number: String(options.asNumber),
+    $cn: options.country,
     $message: String(alert.message),
     $raw_data: JSON.stringify(alert),
   });
@@ -148,6 +203,45 @@ insertAlert({
   decisions: [
     { id: '4201', type: 'ban', value: '45.146.164.110', origin: 'crowdsec', duration: '4h', stopAt: futureIso(4) },
   ],
+});
+
+// Neighbours of 45.146.164.110 — same /24 and same ASN (44477) — so the IP
+// investigation view can demonstrate coordinated-infrastructure detection.
+insertAlert({
+  id: 1043,
+  minutesAgo: 6,
+  scenario: 'crowdsecurity/ssh-bf',
+  reason: 'SSH brute force',
+  ip: '45.146.164.111',
+  country: 'NL',
+  asName: 'Stark Industries Solutions',
+  asNumber: 44477,
+  target: 'ssh',
+  machine: 'edge-gateway-01',
+  origin: 'crowdsec',
+  latitude: 52.3676,
+  longitude: 4.9041,
+  eventsCount: 33,
+  decisions: [
+    { id: '4301', type: 'ban', value: '45.146.164.111', origin: 'crowdsec', duration: '4h', stopAt: futureIso(4) },
+  ],
+});
+
+insertAlert({
+  id: 1044,
+  minutesAgo: 12,
+  scenario: 'crowdsecurity/http-probing',
+  reason: 'HTTP probing',
+  ip: '45.200.10.5',
+  country: 'NL',
+  asName: 'Stark Industries Solutions',
+  asNumber: 44477,
+  target: 'reverse-proxy',
+  machine: 'proxy-01',
+  origin: 'crowdsec',
+  latitude: 52.3676,
+  longitude: 4.9041,
+  eventsCount: 18,
 });
 
 insertAlert({

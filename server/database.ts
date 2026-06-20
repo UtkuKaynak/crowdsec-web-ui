@@ -25,8 +25,28 @@ export interface AlertInsertParams {
   $created_at: string;
   $scenario?: string;
   $source_ip?: string;
+  $as_number?: string;
+  $cn?: string;
   $message: string;
   $raw_data: string;
+}
+
+export interface AuditLogInsertParams {
+  $id: string;
+  $created_at: string;
+  $actor: string;
+  $action: string;
+  $target?: string | null;
+  $detail_json: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  created_at: string;
+  actor: string;
+  action: string;
+  target: string | null;
+  detail_json: string;
 }
 
 export interface DecisionInsertParams {
@@ -133,6 +153,9 @@ export class CrowdsecDatabase {
   private readonly countUnreadNotificationsStatement: any;
   private readonly getCveCacheEntryStatement: any;
   private readonly upsertCveCacheEntryStatement: any;
+  private readonly insertAuditLogStatement: any;
+  private readonly listAuditLogPageStatement: any;
+  private readonly countAuditLogStatement: any;
 
   constructor(options: DatabaseOptions = {}) {
     const resolvedPath = resolveDatabasePath(options);
@@ -140,8 +163,8 @@ export class CrowdsecDatabase {
     initSchema(this.db);
 
     this.insertAlertStatement = this.db.query(`
-      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, message, raw_data)
-      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $message, $raw_data)
+      INSERT OR REPLACE INTO alerts (id, uuid, created_at, scenario, source_ip, as_number, cn, message, raw_data)
+      VALUES ($id, $uuid, $created_at, $scenario, $source_ip, $as_number, $cn, $message, $raw_data)
     `);
 
     this.getAllAlertsStatement = this.db.query(`
@@ -301,6 +324,17 @@ export class CrowdsecDatabase {
       INSERT OR REPLACE INTO cve_cache (id, published_at, fetched_at)
       VALUES ($id, $published_at, $fetched_at)
     `);
+    this.insertAuditLogStatement = this.db.query(`
+      INSERT INTO audit_log (id, created_at, actor, action, target, detail_json)
+      VALUES ($id, $created_at, $actor, $action, $target, $detail_json)
+    `);
+    this.listAuditLogPageStatement = this.db.query(`
+      SELECT id, created_at, actor, action, target, detail_json
+      FROM audit_log
+      ORDER BY created_at DESC, id DESC
+      LIMIT $limit OFFSET $offset
+    `);
+    this.countAuditLogStatement = this.db.query('SELECT COUNT(*) as count FROM audit_log');
   }
 
   close(): void {
@@ -317,7 +351,19 @@ export class CrowdsecDatabase {
   }
 
   insertAlert(params: AlertInsertParams): void {
-    this.insertAlertStatement.run(params);
+    // Coalesce optional columns to null: better-sqlite3 rejects named
+    // parameters that are missing or undefined.
+    this.insertAlertStatement.run({
+      $id: params.$id,
+      $uuid: params.$uuid,
+      $created_at: params.$created_at,
+      $scenario: params.$scenario ?? null,
+      $source_ip: params.$source_ip ?? null,
+      $as_number: params.$as_number ?? null,
+      $cn: params.$cn ?? null,
+      $message: params.$message,
+      $raw_data: params.$raw_data,
+    });
   }
 
   getAllAlerts(): RowWithRawData[] {
@@ -629,6 +675,30 @@ export class CrowdsecDatabase {
     this.upsertCveCacheEntryStatement.run({ $id: id, $published_at: publishedAt, $fetched_at: fetchedAt });
   }
 
+  insertAuditLog(params: AuditLogInsertParams): void {
+    this.insertAuditLogStatement.run({
+      $id: params.$id,
+      $created_at: params.$created_at,
+      $actor: params.$actor,
+      $action: params.$action,
+      $target: params.$target ?? null,
+      $detail_json: params.$detail_json,
+    });
+  }
+
+  listAuditLogPage(page: number, pageSize: number): AuditLogEntry[] {
+    const safePage = Math.max(1, page);
+    const safePageSize = Math.max(1, pageSize);
+    return this.listAuditLogPageStatement.all({
+      $limit: safePageSize,
+      $offset: (safePage - 1) * safePageSize,
+    }) as AuditLogEntry[];
+  }
+
+  countAuditLog(): number {
+    return (this.countAuditLogStatement.get() as CountRow).count;
+  }
+
   transaction<T>(callback: (value: T) => void): (value: T) => void {
     return this.db.transaction(callback);
   }
@@ -728,11 +798,16 @@ function initSchema(db: Database): void {
       created_at TEXT NOT NULL,
       scenario TEXT,
       source_ip TEXT,
+      as_number TEXT,
+      cn TEXT,
       message TEXT,
       raw_data TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
   `;
+  // Note: indexes on source_ip / as_number are created in
+  // migrateAlertsEnrichmentColumns, after those columns are guaranteed to exist
+  // (a legacy alerts table predates the as_number column).
 
   const createDecisionsTable = `
     CREATE TABLE IF NOT EXISTS decisions (
@@ -829,13 +904,28 @@ function initSchema(db: Database): void {
     );
   `;
 
+  const createAuditLogTable = `
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT,
+      detail_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+  `;
+
   db.exec(createAlertsTable);
+  migrateAlertsEnrichmentColumns(db);
   db.exec(createMetaTable);
   db.exec(createNotificationChannelsTable);
   db.exec(createNotificationRulesTable);
   db.exec(createNotificationsTable);
   db.exec(createNotificationIncidentsTable);
   db.exec(createCveCacheTable);
+  db.exec(createAuditLogTable);
 
   const tableInfo = db.query('PRAGMA table_info(decisions)').all() as Array<{ name: string; type: string }>;
   const idColumn = tableInfo.find((column) => column.name === 'id');
@@ -881,6 +971,34 @@ function initSchema(db: Database): void {
   migrateNotificationsTable(db, createNotificationsTable);
   db.exec(createNotificationIncidentsTable);
   seedNotificationIncidentsFromHistoryIfEmpty(db);
+}
+
+function migrateAlertsEnrichmentColumns(db: Database): void {
+  const columns = db.query('PRAGMA table_info(alerts)').all() as Array<{ name: string }>;
+  const hasColumn = (name: string): boolean => columns.some((column) => column.name === name);
+  const needsAsNumber = !hasColumn('as_number');
+  const needsCn = !hasColumn('cn');
+
+  if (needsAsNumber) {
+    db.exec('ALTER TABLE alerts ADD COLUMN as_number TEXT');
+  }
+  if (needsCn) {
+    db.exec('ALTER TABLE alerts ADD COLUMN cn TEXT');
+  }
+
+  if (needsAsNumber || needsCn) {
+    // Backfill the new columns from the stored raw CrowdSec JSON for existing rows.
+    db.exec(`
+      UPDATE alerts
+      SET
+        as_number = json_extract(raw_data, '$.source.as_number'),
+        cn = json_extract(raw_data, '$.source.cn')
+      WHERE raw_data IS NOT NULL
+    `);
+  }
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_alerts_source_ip ON alerts(source_ip)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_alerts_as_number ON alerts(as_number)');
 }
 
 function migrateNotificationRulesTable(db: Database, createNotificationRulesTable: string): void {

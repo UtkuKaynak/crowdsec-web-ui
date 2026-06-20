@@ -12,6 +12,7 @@ import { ScenarioName } from "../components/ScenarioName";
 import { TimeDisplay } from "../components/TimeDisplay";
 import { EventCard } from "../components/EventCard";
 import { getCountryName } from "../lib/utils";
+import { humanizeMetaKey, formatMetaValue } from "../lib/meta";
 import { useTableColumnViewport } from "../lib/useTableColumnViewport";
 import { DEFAULT_TABLE_COLUMN_PREFERENCES, TABLE_COLUMN_DEFINITIONS } from "../../../shared/contracts";
 import { resolveMachineName } from "../../../shared/machine";
@@ -823,6 +824,9 @@ export function Alerts() {
 
     const visibleAlerts = filteredAlerts;
     const selectedAlertEvents = selectedAlert && hasAlertEvents(selectedAlert) ? selectedAlert.events ?? [] : [];
+    const selectedAlertMeta = (((selectedAlert as AlertRecord | null)?.meta) ?? [])
+        .map((entry) => ({ key: entry.key, value: formatMetaValue(entry.value) }))
+        .filter((entry): entry is { key: string; value: string } => Boolean(entry.key) && entry.value != null && entry.value !== "");
     const selectedAlertIsSimulated = selectedAlert ? isSimulatedAlert(selectedAlert) : false;
     const selectedAlertSourceValue = getAlertSourceValue(selectedAlert?.source);
     const deleteActionTitle = pendingDeleteAction?.kind === "single"
@@ -1402,6 +1406,23 @@ export function Alerts() {
                                             )}
                                         </tbody>
                                     </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Alert Context (console_context meta) */}
+                        {selectedAlertMeta.length > 0 && (
+                            <div>
+                                <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
+                                    {t('pages.alerts.alertContextTitle')}
+                                </h4>
+                                <div className="bg-gray-50 dark:bg-gray-900/30 rounded border border-gray-100 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
+                                    {selectedAlertMeta.map((entry, i) => (
+                                        <div key={`${entry.key}-${i}`} className="grid grid-cols-[minmax(120px,auto)_1fr] gap-3 px-3 py-2 text-sm">
+                                            <span className="text-gray-500 dark:text-gray-400 font-medium" title={entry.key}>{humanizeMetaKey(entry.key)}</span>
+                                            <span className="font-mono break-all text-gray-700 dark:text-gray-300">{entry.value}</span>
+                                        </div>
+                                    ))}
                                 </div>
                             </div>
                         )}

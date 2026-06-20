@@ -1,25 +1,14 @@
 import { Badge } from "./ui/Badge";
 import { Collapsible } from "./ui/Collapsible";
 import { getHubUrl } from "../lib/utils";
-import { ExternalLink, Shield } from "lucide-react";
+import { ExternalLink, Shield, EyeOff } from "lucide-react";
 import type { AlertEvent, AlertMetaValue } from '../types';
 import { useI18n } from "../lib/i18n";
+import { formatMetaValue, humanizeMetaKey, metaValueToPairs } from "../lib/meta";
 
 interface EventCardProps {
     event: AlertEvent;
     index: number;
-}
-
-function formatMetaValue(value: AlertMetaValue | undefined): string | undefined {
-    if (value == null || value === '') {
-        return undefined;
-    }
-
-    if (typeof value === 'object') {
-        return JSON.stringify(value);
-    }
-
-    return String(value);
 }
 
 // Meta keys that get special styled rendering in the summary section
@@ -31,8 +20,19 @@ const STYLED_META_KEYS = new Set([
     'rule_ids', 'msg', 'message',
 ]);
 
-// Excluded from display due to PII/GDPR concerns (per CrowdSec developer guidance)
-const EXCLUDED_META_KEYS = new Set(['context']);
+// Potentially sensitive captured context — shown only behind an explicit,
+// collapsed opt-in with a warning (may contain usernames, paths, payloads).
+const SENSITIVE_META_KEYS = new Set(['context']);
+
+// High-signal operational fields surfaced in a prominent "Context" grid for any
+// scenario (SSH, port scans, etc.) instead of being buried in "Additional
+// Metadata". Order here is the display order; only keys actually present render.
+const CONTEXT_META_KEYS = [
+    'log_type', 'program', 'method', 'auth_type', 'status',
+    'username', 'user', 'target_user', 'source_ip', 'ip',
+    'port', 'dst_port', 'src_port', 'machine',
+    'datasource_type', 'datasource_path',
+];
 
 export function EventCard({ event, index }: EventCardProps) {
     const { t } = useI18n();
@@ -57,11 +57,25 @@ export function EventCard({ event, index }: EventCardProps) {
     const httpUserAgent = formatMetaValue(getMeta('http_user_agent'));
     const service = formatMetaValue(getMeta('service'));
 
-    // Additional meta fields not covered by styled rendering
-    // Filter out entries with empty/null/undefined values
+    const hasValue = (value: AlertMetaValue | undefined): boolean => value != null && value !== '';
+
+    // Prominent "Context" grid: curated operational fields, in CONTEXT_META_KEYS order.
+    const contextMeta = CONTEXT_META_KEYS
+        .map((key) => ({ key, value: getMeta(key) }))
+        .filter((entry) => hasValue(entry.value));
+
+    // Everything else not already styled or surfaced above goes to the collapsible.
     const additionalMeta = event.meta?.filter((meta) =>
-        !STYLED_META_KEYS.has(meta.key) && !EXCLUDED_META_KEYS.has(meta.key) && meta.value != null && meta.value !== ''
+        !STYLED_META_KEYS.has(meta.key)
+        && !SENSITIVE_META_KEYS.has(meta.key)
+        && !CONTEXT_META_KEYS.includes(meta.key)
+        && hasValue(meta.value)
     ) || [];
+
+    // Potentially sensitive captured context, flattened to key/value rows.
+    const sensitiveContext = (event.meta ?? [])
+        .filter((meta) => SENSITIVE_META_KEYS.has(meta.key) && hasValue(meta.value))
+        .flatMap((meta) => metaValueToPairs(meta.value));
 
     return (
         <div className={`flex gap-3 items-start p-3 rounded border text-sm ${isAppSecEvent
@@ -173,6 +187,25 @@ export function EventCard({ event, index }: EventCardProps) {
                     </div>
                 )}
 
+                {/* Context — prominent labelled grid of operational fields */}
+                {contextMeta.length > 0 && (
+                    <div>
+                        <div className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">
+                            {t('components.eventCard.context')}
+                        </div>
+                        <div className="bg-white dark:bg-gray-950 rounded border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
+                            {contextMeta.map((meta) => (
+                                <div key={meta.key} className="grid grid-cols-[minmax(110px,auto)_1fr] gap-3 px-3 py-1.5 text-xs">
+                                    <span className="text-gray-500 dark:text-gray-400 font-medium">{humanizeMetaKey(meta.key)}</span>
+                                    <span className="font-mono break-all text-gray-700 dark:text-gray-300">
+                                        {formatMetaValue(meta.value)}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
                 {/* Additional Metadata — collapsible generic key-value display */}
                 {additionalMeta.length > 0 && (
                     <Collapsible
@@ -186,10 +219,35 @@ export function EventCard({ event, index }: EventCardProps) {
                         <div className="mt-1 bg-white dark:bg-gray-950 rounded border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800">
                             {additionalMeta.map((meta, i) => (
                                 <div key={i} className="grid grid-cols-[minmax(100px,auto)_1fr] gap-3 px-3 py-1.5 text-xs">
-                                    <span className="text-gray-500 font-medium">{meta.key}</span>
+                                    <span className="text-gray-500 font-medium" title={meta.key}>{humanizeMetaKey(meta.key)}</span>
                                     <span className="font-mono break-all text-gray-700 dark:text-gray-300">
                                         {formatMetaValue(meta.value)}
                                     </span>
+                                </div>
+                            ))}
+                        </div>
+                    </Collapsible>
+                )}
+
+                {/* Captured context — potentially sensitive, opt-in + collapsed */}
+                {sensitiveContext.length > 0 && (
+                    <Collapsible
+                        trigger={
+                            <span className="text-xs font-medium text-amber-600 dark:text-amber-400 inline-flex items-center gap-1.5">
+                                <EyeOff size={12} />
+                                {t('components.eventCard.capturedContext')}
+                            </span>
+                        }
+                        defaultOpen={false}
+                    >
+                        <p className="mt-1 mb-1 text-[11px] text-amber-600/80 dark:text-amber-400/80">
+                            {t('components.eventCard.capturedContextNote')}
+                        </p>
+                        <div className="bg-white dark:bg-gray-950 rounded border border-amber-200 dark:border-amber-900/40 divide-y divide-gray-100 dark:divide-gray-800">
+                            {sensitiveContext.map((pair, i) => (
+                                <div key={`${pair.key}-${i}`} className="grid grid-cols-[minmax(110px,auto)_1fr] gap-3 px-3 py-1.5 text-xs">
+                                    <span className="text-gray-500 dark:text-gray-400 font-medium" title={pair.key}>{pair.key ? humanizeMetaKey(pair.key) : '-'}</span>
+                                    <span className="font-mono break-all text-gray-700 dark:text-gray-300">{pair.value}</span>
                                 </div>
                             ))}
                         </div>

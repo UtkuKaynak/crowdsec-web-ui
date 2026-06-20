@@ -161,6 +161,8 @@ export interface AlertRecord {
   events_count?: number;
   events?: AlertEvent[];
   decisions?: AlertDecision[];
+  /** Alert-level meta (CrowdSec "console context"), populated when configured on the engine. */
+  meta?: AlertMeta[];
   target?: string;
   meta_search?: string;
   simulated?: boolean;
@@ -228,6 +230,60 @@ export interface StatsAlert {
   source: Pick<AlertSource, 'ip' | 'value' | 'range' | 'cn' | 'as_name' | 'scope'> | null;
   target?: string;
   simulated?: boolean;
+}
+
+export type AuditAction =
+  | 'decision.add'
+  | 'decision.delete'
+  | 'decision.bulk_delete'
+  | 'alert.delete'
+  | 'alert.bulk_delete'
+  | 'cleanup.by_ip';
+
+export interface AuditLogItem {
+  id: string;
+  created_at: string;
+  actor: string;
+  action: AuditAction | string;
+  target: string | null;
+  detail: Record<string, unknown>;
+}
+
+export interface IpScenarioActivity {
+  scenario: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface IpRelatedItem {
+  ip: string;
+  alertCount: number;
+  lastSeen: string;
+  active: boolean;
+}
+
+export interface IpBlocklistMembership {
+  origin: string;
+  scenario: string | null;
+  lastSeen: string;
+}
+
+export interface IpInvestigationResponse {
+  ip: string;
+  rdns: string | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  alertCount: number;
+  timesBanned: number;
+  activeDecisions: number;
+  asNumber: string | null;
+  cn: string | null;
+  cidr24: string | null;
+  scenarios: IpScenarioActivity[];
+  relatedSameSubnet: IpRelatedItem[];
+  relatedSameAsn: IpRelatedItem[];
+  blocklists: IpBlocklistMembership[];
 }
 
 export interface StatsDecision {

@@ -527,4 +527,84 @@ describe('CrowdsecDatabase', () => {
 
     db.close();
   });
+
+  test('migrates a legacy alerts table: adds as_number/cn columns and backfills from raw_data', () => {
+    const dbPath = createTestDatabasePath();
+    const legacy = createLegacyDatabase(dbPath);
+
+    // Simulate the pre-upgrade schema: alerts without as_number/cn and no audit_log table.
+    legacy.exec(`
+      CREATE TABLE alerts (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT UNIQUE,
+        created_at TEXT NOT NULL,
+        scenario TEXT,
+        source_ip TEXT,
+        message TEXT,
+        raw_data TEXT
+      );
+    `);
+    legacy.query(`
+      INSERT INTO alerts (id, uuid, created_at, scenario, source_ip, message, raw_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      1,
+      'alert-legacy-1',
+      '2025-01-01T00:00:00.000Z',
+      'crowdsecurity/ssh-bf',
+      '203.0.113.10',
+      'bruteforce',
+      JSON.stringify({
+        id: 1,
+        source: { value: '203.0.113.10', as_number: '64500', cn: 'US' },
+      }),
+    );
+    legacy.close();
+
+    const db = new CrowdsecDatabase({ dbPath });
+
+    const columns = (db.db.query('PRAGMA table_info(alerts)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain('as_number');
+    expect(columns).toContain('cn');
+
+    const row = db.db
+      .query('SELECT as_number, cn FROM alerts WHERE id = 1')
+      .get() as { as_number: string | null; cn: string | null };
+    expect(row.as_number).toBe('64500');
+    expect(row.cn).toBe('US');
+
+    db.close();
+  });
+
+  test('creates the audit_log table and supports insert/list/count', () => {
+    const db = createTestDatabase();
+
+    expect(db.countAuditLog()).toBe(0);
+
+    db.insertAuditLog({
+      $id: 'audit-1',
+      $created_at: '2025-01-01T00:00:00.000Z',
+      $actor: 'admin@example.com',
+      $action: 'decision.add',
+      $target: '203.0.113.10',
+      $detail_json: JSON.stringify({ duration: '4h' }),
+    });
+    // Omitting the optional target must be accepted (coalesced to null).
+    db.insertAuditLog({
+      $id: 'audit-2',
+      $created_at: '2025-01-01T01:00:00.000Z',
+      $actor: 'unknown',
+      $action: 'cleanup.by_ip',
+      $detail_json: '{}',
+    });
+
+    expect(db.countAuditLog()).toBe(2);
+    const page = db.listAuditLogPage(1, 50);
+    expect(page).toHaveLength(2);
+    // Most recent first.
+    expect(page[0]).toMatchObject({ id: 'audit-2', actor: 'unknown', target: null });
+    expect(page[1]).toMatchObject({ id: 'audit-1', action: 'decision.add', target: '203.0.113.10' });
+
+    db.close();
+  });
 });

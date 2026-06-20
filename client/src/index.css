@@ -11,6 +11,16 @@
     color-scheme: dark;
   }
 
+  /* "Darker" (OLED) theme: keeps every dark: utility but remaps the neutral
+     palette to near-black. Utilities compile to var(--color-gray-*), so these
+     overrides cascade to all surfaces/borders without touching components. */
+  :root.dark.theme-darker {
+    --color-gray-950: #000000;
+    --color-gray-900: #0a0a0a;
+    --color-gray-800: #161616;
+    --color-gray-700: #242424;
+  }
+
   body {
     @apply bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 antialiased;
   }
