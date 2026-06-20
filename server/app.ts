@@ -46,6 +46,7 @@ import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type Runtim
 import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } from './database';
 import { Analytics } from './analytics';
 import { createRdnsResolver } from './utils/rdns';
+import { createRdapResolver } from './utils/rdap';
 import { getIpVersion } from './utils/ip';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
@@ -337,6 +338,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
   const analytics = new Analytics(database);
   const rdnsResolver = createRdnsResolver();
+  const rdapResolver = createRdapResolver({ enabled: config.ipRdapEnabled });
 
   const app = new Hono();
   const distRoot = options.distRoot || path.resolve(process.cwd(), 'dist/client');
@@ -764,11 +766,20 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     const history = analytics.getIpHistory(ip);
     const related = analytics.getRelatedIps(ip, { asNumber: history.asNumber });
     const blocklists = analytics.getBlocklistMemberships(ip);
-    const rdns = await rdnsResolver.resolve(ip);
+    const decisions = analytics.getIpDecisions(ip);
+    const activity = analytics.getActivitySeries(ip);
+    const subnetAggregate = analytics.getSubnetAggregate(ip);
+    const asnAggregate = analytics.getAsnAggregate(history.asNumber);
+    // External enrichment runs concurrently and is best-effort (null on failure).
+    const [rdnsResult, whois] = await Promise.all([
+      rdnsResolver.resolveConfirmed(ip),
+      rdapResolver.lookup(ip),
+    ]);
 
     const payload: IpInvestigationResponse = {
       ip,
-      rdns,
+      rdns: rdnsResult.ptr,
+      rdnsConfirmed: rdnsResult.confirmed,
       firstSeen: history.firstSeen,
       lastSeen: history.lastSeen,
       alertCount: history.alertCount,
@@ -778,9 +789,14 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       cn: history.cn,
       cidr24: history.cidr24,
       scenarios: history.scenarios,
+      decisions,
+      activity,
+      subnetAggregate,
+      asnAggregate,
       relatedSameSubnet: related.sameSubnet,
       relatedSameAsn: related.sameAsn,
       blocklists,
+      whois,
     };
     return context.json(payload);
   });

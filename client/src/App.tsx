@@ -13,6 +13,7 @@ const Alerts = lazy(async () => ({ default: (await import('./pages/Alerts')).Ale
 const Decisions = lazy(async () => ({ default: (await import('./pages/Decisions')).Decisions }));
 const Notifications = lazy(async () => ({ default: (await import('./pages/Notifications')).Notifications }));
 const AuditLog = lazy(async () => ({ default: (await import('./pages/AuditLog')).AuditLog }));
+const IpInvestigation = lazy(async () => ({ default: (await import('./pages/IpInvestigation')).IpInvestigation }));
 
 function RouteFallback() {
   const { t } = useI18n();
@@ -67,6 +68,14 @@ function AppContent() {
               element={(
                 <Suspense fallback={<RouteFallback />}>
                   <AuditLog />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="ip/:ip"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <IpInvestigation />
                 </Suspense>
               )}
             />

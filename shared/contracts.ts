@@ -269,9 +269,38 @@ export interface IpBlocklistMembership {
   lastSeen: string;
 }
 
+export interface IpDecisionItem {
+  id: string;
+  type: string;
+  origin: string;
+  scenario: string | null;
+  created_at: string;
+  stop_at: string;
+  duration: string | null;
+  expired: boolean;
+}
+
+export interface IpActivityPoint {
+  day: string;
+  count: number;
+}
+
+export interface IpNetworkAggregate {
+  key: string;
+  ipCount: number;
+  alertCount: number;
+}
+
+export interface IpWhois {
+  name: string | null;
+  handle: string | null;
+  abuseEmail: string | null;
+}
+
 export interface IpInvestigationResponse {
   ip: string;
   rdns: string | null;
+  rdnsConfirmed: boolean | null;
   firstSeen: string | null;
   lastSeen: string | null;
   alertCount: number;
@@ -281,9 +310,14 @@ export interface IpInvestigationResponse {
   cn: string | null;
   cidr24: string | null;
   scenarios: IpScenarioActivity[];
+  decisions: IpDecisionItem[];
+  activity: IpActivityPoint[];
+  subnetAggregate: IpNetworkAggregate | null;
+  asnAggregate: IpNetworkAggregate | null;
   relatedSameSubnet: IpRelatedItem[];
   relatedSameAsn: IpRelatedItem[];
   blocklists: IpBlocklistMembership[];
+  whois: IpWhois | null;
 }
 
 export interface StatsDecision {

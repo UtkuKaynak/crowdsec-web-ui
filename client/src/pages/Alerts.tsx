@@ -18,7 +18,7 @@ import { DEFAULT_TABLE_COLUMN_PREFERENCES, TABLE_COLUMN_DEFINITIONS } from "../.
 import { resolveMachineName } from "../../../shared/machine";
 import { collectDistinctOrigins, getOriginDisplayValue, getOriginTitle } from "../../../shared/origin";
 import { compileAlertSearch, getSearchHelpDefinition, type SearchParseError } from "../../../shared/search";
-import { Info, ExternalLink, Shield, ShieldBan, Trash2, X, AlertCircle, Columns3 } from "lucide-react";
+import { Info, ExternalLink, Shield, ShieldBan, Trash2, X, AlertCircle, Columns3, Network } from "lucide-react";
 import type { AlertRecord, AlertSource, ApiPermissionError, BulkDeleteResult, DecisionListItem, SimulationFilter, SlimAlert, TableColumnId, TableColumnPreferences, TableColumnViewportPreferences } from '../types';
 import { useI18n, type I18nContextValue } from "../lib/i18n";
 
@@ -1085,7 +1085,15 @@ export function Alerts() {
                                                     case 'source':
                                                         return (
                                                             <td key={columnId} className="px-6 py-4 text-sm font-mono text-gray-900 dark:text-gray-100 max-w-[200px] truncate" title={sourceValue}>
-                                                                {sourceValue || "-"}
+                                                                {sourceValue && !sourceValue.includes('/') ? (
+                                                                    <Link
+                                                                        to={`/ip/${encodeURIComponent(sourceValue)}`}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        className="text-primary-600 dark:text-primary-400 hover:underline transition-colors"
+                                                                    >
+                                                                        {sourceValue}
+                                                                    </Link>
+                                                                ) : (sourceValue || "-")}
                                                             </td>
                                                         );
                                                     case 'machine':
@@ -1290,6 +1298,15 @@ export function Alerts() {
                                         <span>{selectedAlert.source.as_name}</span>
                                     )}
                                 </div>
+                                {selectedAlertSourceValue && !String(selectedAlertSourceValue).includes('/') && (
+                                    <Link
+                                        to={`/ip/${encodeURIComponent(String(selectedAlertSourceValue))}`}
+                                        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition-colors"
+                                    >
+                                        <Network size={14} />
+                                        {t('pages.alerts.investigateIp')}
+                                    </Link>
+                                )}
                             </div>
                         </div>
 

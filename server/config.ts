@@ -43,6 +43,7 @@ export interface RuntimeConfig {
   notificationAllowPrivateAddresses: boolean;
   notificationDebugPayloads: boolean;
   auditUserHeaders: string[];
+  ipRdapEnabled: boolean;
 }
 
 export function parseRefreshInterval(intervalStr: string | undefined | null): number {
@@ -258,6 +259,7 @@ export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runti
     notificationAllowPrivateAddresses: parseBooleanEnv(env.NOTIFICATION_ALLOW_PRIVATE_ADDRESSES, true),
     notificationDebugPayloads: parseBooleanEnv(env.NOTIFICATION_DEBUG_PAYLOADS, false),
     auditUserHeaders: parseAuditUserHeaders(env.AUDIT_USER_HEADER),
+    ipRdapEnabled: parseBooleanEnv(env.IP_RDAP_ENABLED, true),
   };
 }
 

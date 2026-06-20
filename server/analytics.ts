@@ -46,6 +46,28 @@ export interface BlocklistMembership {
   lastSeen: string;
 }
 
+export interface IpDecision {
+  id: string;
+  type: string;
+  origin: string;
+  scenario: string | null;
+  created_at: string;
+  stop_at: string;
+  duration: string | null;
+  expired: boolean;
+}
+
+export interface ActivityPoint {
+  day: string;
+  count: number;
+}
+
+export interface NetworkAggregate {
+  key: string;
+  ipCount: number;
+  alertCount: number;
+}
+
 interface SqlRow {
   [column: string]: unknown;
 }
@@ -205,6 +227,104 @@ export class Analytics {
         scenario: (row.scenario as string) ?? null,
         lastSeen: String(row.lastSeen),
       }));
+  }
+
+  /** All decisions (active + expired) recorded against the IP, newest first. */
+  getIpDecisions(ip: string): IpDecision[] {
+    const nowIso = new Date().toISOString();
+    const rows = this.db
+      .query(
+        `SELECT id, type, origin, scenario, created_at, stop_at, raw_data
+         FROM decisions
+         WHERE value = $ip
+         ORDER BY stop_at DESC`,
+      )
+      .all({ $ip: ip }) as SqlRow[];
+
+    return rows.map((row) => {
+      let duration: string | null = null;
+      try {
+        const raw = JSON.parse(String(row.raw_data ?? '{}')) as { duration?: unknown };
+        if (raw.duration != null && raw.duration !== '') {
+          duration = String(raw.duration);
+        }
+      } catch {
+        duration = null;
+      }
+      const stopAt = String(row.stop_at ?? '');
+      return {
+        id: String(row.id ?? ''),
+        type: String(row.type ?? ''),
+        origin: String(row.origin ?? ''),
+        scenario: (row.scenario as string) ?? null,
+        created_at: String(row.created_at ?? ''),
+        stop_at: stopAt,
+        duration,
+        expired: stopAt !== '' && stopAt <= nowIso,
+      };
+    });
+  }
+
+  /** Alerts-per-day counts for the IP (UTC days), oldest first. */
+  getActivitySeries(ip: string): ActivityPoint[] {
+    const rows = this.db
+      .query(
+        `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+         FROM alerts
+         WHERE source_ip = $ip
+         GROUP BY day
+         ORDER BY day ASC`,
+      )
+      .all({ $ip: ip }) as SqlRow[];
+    return rows.map((row) => ({ day: String(row.day), count: Number(row.count ?? 0) }));
+  }
+
+  /** Distinct IPs and total alerts seen in the IP's /24 (or /64 for IPv6). */
+  getSubnetAggregate(ip: string): NetworkAggregate | null {
+    const cidr = ipToNetworkCidr(ip);
+    const version = getIpVersion(ip);
+    if (!cidr || version !== 4) {
+      // IPv4 prefix-match keeps this cheap; skip aggregate for IPv6.
+      return cidr ? { key: cidr, ipCount: 0, alertCount: 0 } : null;
+    }
+    const prefix = ip.slice(0, ip.lastIndexOf('.') + 1);
+    const rows = this.db
+      .query(
+        `SELECT source_ip AS ip, COUNT(*) AS alertCount
+         FROM alerts
+         WHERE source_ip LIKE $prefix
+         GROUP BY source_ip`,
+      )
+      .all({ $prefix: `${prefix}%` }) as SqlRow[];
+
+    let ipCount = 0;
+    let alertCount = 0;
+    for (const row of rows) {
+      if (ipToNetworkCidr(String(row.ip)) === cidr) {
+        ipCount += 1;
+        alertCount += Number(row.alertCount ?? 0);
+      }
+    }
+    return { key: cidr, ipCount, alertCount };
+  }
+
+  /** Distinct IPs and total alerts seen for an ASN. */
+  getAsnAggregate(asNumber: string | null): NetworkAggregate | null {
+    if (!asNumber) {
+      return null;
+    }
+    const row = this.db
+      .query(
+        `SELECT COUNT(DISTINCT source_ip) AS ipCount, COUNT(*) AS alertCount
+         FROM alerts
+         WHERE as_number = $asNumber`,
+      )
+      .get({ $asNumber: asNumber }) as SqlRow | undefined;
+    return {
+      key: `AS${asNumber}`,
+      ipCount: Number(row?.ipCount ?? 0),
+      alertCount: Number(row?.alertCount ?? 0),
+    };
   }
 
   private toRelatedIp(row: SqlRow): RelatedIp {
