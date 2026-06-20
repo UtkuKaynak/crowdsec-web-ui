@@ -320,6 +320,37 @@ export interface IpInvestigationResponse {
   whois: IpWhois | null;
 }
 
+export interface IncidentTopIp {
+  ip: string;
+  count: number;
+}
+
+export interface IncidentItem {
+  key: string;
+  scenario: string;
+  cidr: string;
+  asn: string | null;
+  country: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  ipCount: number;
+  alertCount: number;
+  activeBans: number;
+  topIps: IncidentTopIp[];
+  isNew: boolean;
+  baselineDailyAvg: number;
+  ratioVsBaseline: number | null;
+  isNewSinceLastView: boolean;
+}
+
+export interface IncidentsResponse {
+  windowHours: number;
+  since: string;
+  lastViewedAt: string | null;
+  totalAlerts: number;
+  incidents: IncidentItem[];
+}
+
 export interface StatsDecision {
   id: string | number;
   created_at: string;

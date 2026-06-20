@@ -3,6 +3,7 @@ import type {
   AlertRecord,
   ApiPermissionError,
   AuditLogItem,
+  IncidentsResponse,
   IpInvestigationResponse,
   BulkDeleteRequest,
   BulkDeleteResult,
@@ -205,6 +206,18 @@ export async function fetchIpInvestigation(ip: string): Promise<IpInvestigationR
         undefined,
         'Failed to fetch IP investigation data',
     );
+}
+
+export async function fetchIncidents(window = '24h'): Promise<IncidentsResponse> {
+    return fetchJson<IncidentsResponse>(
+        `/api/incidents?window=${encodeURIComponent(window)}`,
+        undefined,
+        'Failed to fetch incidents',
+    );
+}
+
+export async function markIncidentsSeen(): Promise<{ lastViewedAt: string }> {
+    return sendJson<{ lastViewedAt: string }>('/api/incidents/mark-seen', { method: 'POST' }, 'Failed to mark incidents seen');
 }
 
 export async function fetchAuditLogPaginated(

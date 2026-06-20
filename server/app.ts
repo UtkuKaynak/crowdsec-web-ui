@@ -23,6 +23,7 @@ import type {
   DashboardWorldMapDatum,
   DecisionListItem,
   AuditLogItem,
+  IncidentsResponse,
   IpInvestigationResponse,
   LapiStatus,
   PaginatedResponse,
@@ -799,6 +800,22 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       whois,
     };
     return context.json(payload);
+  });
+
+  const INCIDENTS_LAST_VIEWED_KEY = 'incidents_last_viewed_at';
+
+  app.get(`${config.basePath}/api/incidents`, ensureAuth, (context) => {
+    const windowHours = parseWindowHours(context.req.query('window'));
+    const lastViewedAt = database.getMeta(INCIDENTS_LAST_VIEWED_KEY)?.value ?? null;
+    const result = analytics.getIncidents({ windowHours, lastViewedAt, nowMs: Date.now() });
+    const payload: IncidentsResponse = { ...result, lastViewedAt };
+    return context.json(payload);
+  });
+
+  app.post(`${config.basePath}/api/incidents/mark-seen`, ensureAuth, (context) => {
+    const lastViewedAt = new Date().toISOString();
+    database.setMeta(INCIDENTS_LAST_VIEWED_KEY, lastViewedAt);
+    return context.json({ lastViewedAt });
   });
 
   app.post(`${config.basePath}/api/cleanup/by-ip`, ensureAuth, async (context) => {
@@ -3323,6 +3340,16 @@ function getNumericDecisionId(id: string | number): number {
   }
   const numeric = Number.parseInt(value, 10);
   return Number.isNaN(numeric) ? Number.POSITIVE_INFINITY : numeric;
+}
+
+function parseWindowHours(raw: string | undefined): number {
+  const match = String(raw ?? '').trim().match(/^(\d+)\s*([hd])$/i);
+  if (!match) {
+    return 24;
+  }
+  const value = Number.parseInt(match[1], 10);
+  const hours = match[2].toLowerCase() === 'd' ? value * 24 : value;
+  return Math.min(720, Math.max(1, hours));
 }
 
 function parseAuditDetail(detailJson: string): Record<string, unknown> {

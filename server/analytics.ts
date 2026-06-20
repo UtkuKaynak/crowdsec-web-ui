@@ -68,6 +68,36 @@ export interface NetworkAggregate {
   alertCount: number;
 }
 
+export interface IncidentTopIp {
+  ip: string;
+  count: number;
+}
+
+export interface Incident {
+  key: string;
+  scenario: string;
+  cidr: string;
+  asn: string | null;
+  country: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  ipCount: number;
+  alertCount: number;
+  activeBans: number;
+  topIps: IncidentTopIp[];
+  isNew: boolean;
+  baselineDailyAvg: number;
+  ratioVsBaseline: number | null;
+  isNewSinceLastView: boolean;
+}
+
+export interface IncidentsResult {
+  windowHours: number;
+  since: string;
+  totalAlerts: number;
+  incidents: Incident[];
+}
+
 interface SqlRow {
   [column: string]: unknown;
 }
@@ -324,6 +354,142 @@ export class Analytics {
       key: `AS${asNumber}`,
       ipCount: Number(row?.ipCount ?? 0),
       alertCount: Number(row?.alertCount ?? 0),
+    };
+  }
+
+  /**
+   * Clusters recent alerts into incidents by (scenario, /24) and compares each
+   * scenario's volume against a trailing baseline. Turns hundreds of rows into
+   * a handful of "stories" for triage.
+   */
+  getIncidents(options: {
+    windowHours: number;
+    baselineDays?: number;
+    lastViewedAt?: string | null;
+    nowMs: number;
+    maxIncidents?: number;
+  }): IncidentsResult {
+    const baselineDays = options.baselineDays ?? 7;
+    const maxIncidents = options.maxIncidents ?? 200;
+    const lastViewedAt = options.lastViewedAt ?? null;
+    const nowIso = new Date(options.nowMs).toISOString();
+    const sinceIso = new Date(options.nowMs - options.windowHours * 3_600_000).toISOString();
+    const baselineSinceIso = new Date(options.nowMs - options.windowHours * 3_600_000 - baselineDays * 86_400_000).toISOString();
+
+    const windowRows = this.db
+      .query(
+        `SELECT source_ip AS ip, scenario, as_number AS asn, cn, created_at
+         FROM alerts
+         WHERE created_at >= $since AND source_ip IS NOT NULL AND source_ip <> ''
+         ORDER BY created_at ASC`,
+      )
+      .all({ $since: sinceIso }) as SqlRow[];
+
+    // Active bans, loaded once and intersected per cluster.
+    const activeBanRows = this.db
+      .query('SELECT DISTINCT value FROM decisions WHERE stop_at > $now')
+      .all({ $now: nowIso }) as SqlRow[];
+    const activeBans = new Set(activeBanRows.map((row) => String(row.value)));
+
+    // Per-scenario baseline counts (the window's preceding days).
+    const baselineRows = this.db
+      .query(
+        `SELECT scenario, COUNT(*) AS count
+         FROM alerts
+         WHERE created_at >= $baselineSince AND created_at < $since
+         GROUP BY scenario`,
+      )
+      .all({ $baselineSince: baselineSinceIso, $since: sinceIso }) as SqlRow[];
+    const baselineByScenario = new Map<string, number>();
+    for (const row of baselineRows) {
+      baselineByScenario.set(String(row.scenario ?? ''), Number(row.count ?? 0));
+    }
+
+    interface Cluster {
+      scenario: string;
+      cidr: string;
+      asn: string | null;
+      country: string | null;
+      firstSeen: string;
+      lastSeen: string;
+      alertCount: number;
+      ipCounts: Map<string, number>;
+    }
+    const clusters = new Map<string, Cluster>();
+    const windowCountByScenario = new Map<string, number>();
+
+    for (const row of windowRows) {
+      const ip = String(row.ip);
+      const scenario = String(row.scenario ?? '');
+      const cidr = ipToNetworkCidr(ip) ?? ip;
+      const createdAt = String(row.created_at ?? '');
+      const key = `${scenario} ${cidr}`;
+
+      windowCountByScenario.set(scenario, (windowCountByScenario.get(scenario) ?? 0) + 1);
+
+      let cluster = clusters.get(key);
+      if (!cluster) {
+        cluster = {
+          scenario,
+          cidr,
+          asn: (row.asn as string) || null,
+          country: (row.cn as string) || null,
+          firstSeen: createdAt,
+          lastSeen: createdAt,
+          alertCount: 0,
+          ipCounts: new Map(),
+        };
+        clusters.set(key, cluster);
+      }
+      cluster.alertCount += 1;
+      cluster.ipCounts.set(ip, (cluster.ipCounts.get(ip) ?? 0) + 1);
+      if (createdAt < cluster.firstSeen) cluster.firstSeen = createdAt;
+      if (createdAt > cluster.lastSeen) cluster.lastSeen = createdAt;
+      if (!cluster.asn && row.asn) cluster.asn = String(row.asn);
+      if (!cluster.country && row.cn) cluster.country = String(row.cn);
+    }
+
+    const windowDays = options.windowHours / 24;
+    const incidents: Incident[] = Array.from(clusters.entries()).map(([key, cluster]) => {
+      const ips = Array.from(cluster.ipCounts.entries());
+      const topIps = ips
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([ip, count]) => ({ ip, count }));
+      const activeBanCount = ips.reduce((sum, [ip]) => sum + (activeBans.has(ip) ? 1 : 0), 0);
+
+      const baselineCount = baselineByScenario.get(cluster.scenario) ?? 0;
+      const baselineDailyAvg = baselineCount / baselineDays;
+      const expectedForWindow = baselineDailyAvg * windowDays;
+      const scenarioWindowCount = windowCountByScenario.get(cluster.scenario) ?? cluster.alertCount;
+      const ratioVsBaseline = expectedForWindow > 0 ? scenarioWindowCount / expectedForWindow : null;
+
+      return {
+        key,
+        scenario: cluster.scenario,
+        cidr: cluster.cidr,
+        asn: cluster.asn,
+        country: cluster.country,
+        firstSeen: cluster.firstSeen,
+        lastSeen: cluster.lastSeen,
+        ipCount: cluster.ipCounts.size,
+        alertCount: cluster.alertCount,
+        activeBans: activeBanCount,
+        topIps,
+        isNew: baselineCount === 0,
+        baselineDailyAvg,
+        ratioVsBaseline,
+        isNewSinceLastView: lastViewedAt ? cluster.lastSeen > lastViewedAt : false,
+      };
+    });
+
+    incidents.sort((a, b) => b.alertCount - a.alertCount || b.ipCount - a.ipCount);
+
+    return {
+      windowHours: options.windowHours,
+      since: sinceIso,
+      totalAlerts: windowRows.length,
+      incidents: incidents.slice(0, maxIncidents),
     };
   }
 
