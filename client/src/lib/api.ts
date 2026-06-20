@@ -3,8 +3,12 @@ import type {
   AlertRecord,
   ApiPermissionError,
   AuditLogItem,
+  AllowlistCheckResponse,
+  AllowlistsResponse,
   IncidentsResponse,
   IpInvestigationResponse,
+  KnownGoodEntry,
+  SelfProtectionResponse,
   BulkDeleteRequest,
   BulkDeleteResult,
   CleanupByIpRequest,
@@ -218,6 +222,26 @@ export async function fetchIncidents(window = '24h'): Promise<IncidentsResponse>
 
 export async function markIncidentsSeen(): Promise<{ lastViewedAt: string }> {
     return sendJson<{ lastViewedAt: string }>('/api/incidents/mark-seen', { method: 'POST' }, 'Failed to mark incidents seen');
+}
+
+export async function fetchSelfProtection(): Promise<SelfProtectionResponse> {
+    return fetchJson<SelfProtectionResponse>('/api/self-protection', undefined, 'Failed to fetch self-protection data');
+}
+
+export async function updateKnownGood(knownGood: KnownGoodEntry[]): Promise<SelfProtectionResponse> {
+    return sendJson<SelfProtectionResponse>('/api/self-protection/known-good', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ knownGood }),
+    }, 'Failed to save known-good list');
+}
+
+export async function fetchAllowlists(): Promise<AllowlistsResponse> {
+    return fetchJson<AllowlistsResponse>('/api/allowlists', undefined, 'Failed to fetch allowlists');
+}
+
+export async function checkAllowlist(ip: string): Promise<AllowlistCheckResponse> {
+    return fetchJson<AllowlistCheckResponse>(`/api/allowlists/check/${encodeURIComponent(ip)}`, undefined, 'Failed to check IP');
 }
 
 export async function fetchAuditLogPaginated(

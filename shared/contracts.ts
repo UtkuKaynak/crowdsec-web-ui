@@ -249,6 +249,55 @@ export interface AuditLogItem {
   detail: Record<string, unknown>;
 }
 
+export type KnownGoodKind = 'cidr' | 'asn';
+
+export interface KnownGoodEntry {
+  value: string;
+  kind: KnownGoodKind;
+  label: string;
+}
+
+export interface KnownGoodHit {
+  decisionId: string;
+  value: string;
+  type: string;
+  origin: string;
+  scenario: string | null;
+  stop_at: string;
+  matchedKind: KnownGoodKind;
+  matchedValue: string;
+  matchedLabel: string;
+}
+
+export interface SelfProtectionResponse {
+  knownGood: KnownGoodEntry[];
+  flagged: KnownGoodHit[];
+}
+
+export interface AllowlistItemView {
+  value: string;
+  description: string | null;
+  expiration: string | null;
+}
+
+export interface AllowlistView {
+  name: string;
+  description: string | null;
+  items: AllowlistItemView[];
+}
+
+export interface AllowlistsResponse {
+  available: boolean;
+  allowlists: AllowlistView[];
+  suggestedName: string;
+}
+
+export interface AllowlistCheckResponse {
+  ip: string;
+  allowlisted: boolean;
+  detail: unknown;
+}
+
 export interface IpScenarioActivity {
   scenario: string;
   count: number;

@@ -65,6 +65,8 @@ export function Layout() {
                 return t('pages.alerts.title');
             case '/decisions':
                 return t('pages.decisions.title');
+            case '/self-protection':
+                return t('pages.selfProtection.title');
             case '/notifications':
                 return t('pages.notifications.title');
             case '/audit-log':

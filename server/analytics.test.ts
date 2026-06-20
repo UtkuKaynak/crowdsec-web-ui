@@ -94,3 +94,46 @@ describe('Analytics.getIncidents', () => {
     db.close();
   });
 });
+
+describe('Analytics.getKnownGoodHits', () => {
+  // getKnownGoodHits uses the real current time, so the ban must end in the real future.
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  function activeDecision(db: CrowdsecDatabase, id: string, value: string): void {
+    db.insertDecision({
+      $id: id, $uuid: id, $alert_id: 0,
+      $created_at: '2026-01-09T00:00:00.000Z', $stop_at: future,
+      $value: value, $type: 'ban', $origin: 'crowdsec', $scenario: 'crowdsecurity/ssh-bf',
+      $raw_data: JSON.stringify({ duration: '4h' }),
+    });
+  }
+
+  test('matches active bans against known-good CIDRs and ASNs', () => {
+    const db = createDb();
+    const analytics = new Analytics(db);
+
+    activeDecision(db, 'd1', '10.0.0.5');   // inside a known-good /24
+    activeDecision(db, 'd2', '8.8.8.8');    // belongs to a known-good ASN
+    activeDecision(db, 'd3', '203.0.113.7'); // not known-good
+
+    // 8.8.8.8 needs an alert row so its ASN can be resolved.
+    db.insertAlert({
+      $id: 1, $uuid: 'a1', $created_at: '2026-01-09T00:00:00.000Z',
+      $scenario: 'crowdsecurity/ssh-bf', $source_ip: '8.8.8.8', $as_number: '15169', $cn: 'US',
+      $message: 'x', $raw_data: '{}',
+    });
+
+    const hits = analytics.getKnownGoodHits([
+      { value: '10.0.0.0/24', kind: 'cidr', label: 'office VPN' },
+      { value: '15169', kind: 'asn', label: 'Google' },
+    ]);
+
+    const byValue = new Map(hits.map((h) => [h.value, h]));
+    expect(byValue.get('10.0.0.5')?.matchedLabel).toBe('office VPN');
+    expect(byValue.get('8.8.8.8')?.matchedKind).toBe('asn');
+    expect(byValue.has('203.0.113.7')).toBe(false);
+    expect(hits).toHaveLength(2);
+
+    db.close();
+  });
+});

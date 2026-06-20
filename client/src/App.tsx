@@ -15,6 +15,7 @@ const Notifications = lazy(async () => ({ default: (await import('./pages/Notifi
 const AuditLog = lazy(async () => ({ default: (await import('./pages/AuditLog')).AuditLog }));
 const IpInvestigation = lazy(async () => ({ default: (await import('./pages/IpInvestigation')).IpInvestigation }));
 const Incidents = lazy(async () => ({ default: (await import('./pages/Incidents')).Incidents }));
+const SelfProtection = lazy(async () => ({ default: (await import('./pages/SelfProtection')).SelfProtection }));
 
 function RouteFallback() {
   const { t } = useI18n();
@@ -69,6 +70,14 @@ function AppContent() {
               element={(
                 <Suspense fallback={<RouteFallback />}>
                   <Incidents />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="self-protection"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <SelfProtection />
                 </Suspense>
               )}
             />

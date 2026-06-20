@@ -1,5 +1,5 @@
 import type { CrowdsecDatabase } from './database';
-import { getIpVersion, ipToNetworkCidr } from './utils/ip';
+import { cidrContainsIp, getIpVersion, ipToNetworkCidr } from './utils/ip';
 
 /**
  * Local analytics computed directly from the SQLite cache (alerts + decisions).
@@ -96,6 +96,26 @@ export interface IncidentsResult {
   since: string;
   totalAlerts: number;
   incidents: Incident[];
+}
+
+export type KnownGoodKind = 'cidr' | 'asn';
+
+export interface KnownGoodEntry {
+  value: string;
+  kind: KnownGoodKind;
+  label: string;
+}
+
+export interface KnownGoodHit {
+  decisionId: string;
+  value: string;
+  type: string;
+  origin: string;
+  scenario: string | null;
+  stop_at: string;
+  matchedKind: KnownGoodKind;
+  matchedValue: string;
+  matchedLabel: string;
 }
 
 interface SqlRow {
@@ -491,6 +511,82 @@ export class Analytics {
       totalAlerts: windowRows.length,
       incidents: incidents.slice(0, maxIncidents),
     };
+  }
+
+  /**
+   * Active bans that intersect the operator's "known-good" list (own mgmt IPs,
+   * VPN ranges, trusted ASNs). Surfaces accidental self-bans for review.
+   */
+  getKnownGoodHits(entries: KnownGoodEntry[]): KnownGoodHit[] {
+    const cidrEntries = entries.filter((e) => e.kind === 'cidr');
+    const asnEntries = entries.filter((e) => e.kind === 'asn');
+    if (cidrEntries.length === 0 && asnEntries.length === 0) {
+      return [];
+    }
+
+    const nowIso = new Date().toISOString();
+    const decisions = this.db
+      .query(
+        `SELECT id, value, type, origin, scenario, stop_at
+         FROM decisions
+         WHERE stop_at > $now AND value IS NOT NULL AND value <> ''
+         ORDER BY stop_at DESC`,
+      )
+      .all({ $now: nowIso }) as SqlRow[];
+
+    // Look up the ASN for each banned IP (from the alert history) in one pass.
+    const asnByIp = new Map<string, string>();
+    if (asnEntries.length > 0) {
+      const values = Array.from(new Set(decisions.map((d) => String(d.value))));
+      const chunkSize = 500;
+      for (let i = 0; i < values.length; i += chunkSize) {
+        const chunk = values.slice(i, i + chunkSize);
+        const placeholders = chunk.map(() => '?').join(',');
+        const rows = this.db
+          .query(`SELECT source_ip AS ip, MAX(as_number) AS asn FROM alerts WHERE source_ip IN (${placeholders}) GROUP BY source_ip`)
+          .all(...chunk) as SqlRow[];
+        for (const row of rows) {
+          if (row.asn != null && row.asn !== '') {
+            asnByIp.set(String(row.ip), String(row.asn));
+          }
+        }
+      }
+    }
+
+    const hits: KnownGoodHit[] = [];
+    for (const decision of decisions) {
+      const value = String(decision.value);
+      const isRange = value.includes('/');
+      let match: KnownGoodEntry | null = null;
+
+      for (const entry of cidrEntries) {
+        if (value === entry.value || (!isRange && cidrContainsIp(entry.value, value))) {
+          match = entry;
+          break;
+        }
+      }
+      if (!match && asnEntries.length > 0) {
+        const asn = asnByIp.get(value);
+        if (asn) {
+          match = asnEntries.find((e) => e.value === asn) ?? null;
+        }
+      }
+
+      if (match) {
+        hits.push({
+          decisionId: String(decision.id),
+          value,
+          type: String(decision.type ?? ''),
+          origin: String(decision.origin ?? ''),
+          scenario: (decision.scenario as string) ?? null,
+          stop_at: String(decision.stop_at ?? ''),
+          matchedKind: match.kind,
+          matchedValue: match.value,
+          matchedLabel: match.label,
+        });
+      }
+    }
+    return hits;
   }
 
   private toRelatedIp(row: SqlRow): RelatedIp {
