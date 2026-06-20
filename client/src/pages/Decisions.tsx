@@ -956,7 +956,15 @@ export function Decisions() {
                                                     case 'source':
                                                         return (
                                                             <td key={columnId} className="px-6 py-4 text-sm font-mono text-gray-900 dark:text-gray-100 max-w-[200px] truncate" title={decision.value}>
-                                                                {decision.value}
+                                                                {decision.value && !decision.value.includes('/') ? (
+                                                                    <Link
+                                                                        to={`/ip/${encodeURIComponent(decision.value)}`}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        className="text-primary-600 dark:text-primary-400 hover:underline transition-colors"
+                                                                    >
+                                                                        {decision.value}
+                                                                    </Link>
+                                                                ) : (decision.value || "-")}
                                                             </td>
                                                         );
                                                     case 'action':

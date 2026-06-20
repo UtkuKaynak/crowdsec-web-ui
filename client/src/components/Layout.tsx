@@ -53,6 +53,9 @@ export function Layout() {
     const location = useLocation();
     
     const getPageTitle = (): string => {
+        if (location.pathname.startsWith('/ip/')) {
+            return t('pages.ipInvestigation.title');
+        }
         switch (location.pathname) {
             case '/':
                 return t('pages.dashboard.title');
