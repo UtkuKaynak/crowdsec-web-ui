@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, ShieldAlert, Gavel, Bell, X, Sun, Moon, ArrowUpCircle, Menu, PanelLeftClose, Globe2 } from "lucide-react";
+import { LayoutDashboard, ShieldAlert, Gavel, Bell, X, Sun, Moon, MoonStar, ArrowUpCircle, Menu, PanelLeftClose, Globe2, ScrollText } from "lucide-react";
 import { Badge } from "./ui/Badge";
 import { useNotificationUnreadCount } from "../contexts/useNotificationUnreadCount";
 import { useRefresh } from "../contexts/useRefresh";
@@ -14,7 +14,7 @@ import {
     type LanguagePreference,
 } from "../lib/i18n";
 
-type ThemeMode = 'light' | 'dark';
+type ThemeMode = 'light' | 'dark' | 'darker';
 
 interface SidebarProps {
     isOpen: boolean;
@@ -73,6 +73,7 @@ export function Sidebar({ isOpen, onClose, onToggle, theme, toggleTheme }: Sideb
         { to: "/alerts", label: "components.sidebar.nav.alerts", icon: ShieldAlert },
         { to: "/decisions", label: "components.sidebar.nav.decisions", icon: Gavel },
         { to: "/notifications", label: "components.sidebar.nav.notifications", icon: Bell },
+        { to: "/audit-log", label: "components.sidebar.nav.auditLog", icon: ScrollText },
     ];
 
     useEffect(() => {
@@ -251,9 +252,13 @@ export function Sidebar({ isOpen, onClose, onToggle, theme, toggleTheme }: Sideb
                     onClick={toggleTheme}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                 >
-                    {theme === "light" ? <Moon size={18} /> : <Sun size={18} />}
+                    {theme === "light" ? <Moon size={18} /> : theme === "dark" ? <MoonStar size={18} /> : <Sun size={18} />}
                     <span className="text-sm font-medium">
-                        {theme === "light" ? t('components.sidebar.darkMode') : t('components.sidebar.lightMode')}
+                        {theme === "light"
+                            ? t('components.sidebar.darkMode')
+                            : theme === "dark"
+                                ? t('components.sidebar.darkerMode')
+                                : t('components.sidebar.lightMode')}
                     </span>
                 </button>
 

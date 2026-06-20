@@ -42,6 +42,7 @@ export interface RuntimeConfig {
   notificationSecretKey?: string;
   notificationAllowPrivateAddresses: boolean;
   notificationDebugPayloads: boolean;
+  auditUserHeaders: string[];
 }
 
 export function parseRefreshInterval(intervalStr: string | undefined | null): number {
@@ -256,5 +257,22 @@ export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runti
     notificationSecretKey,
     notificationAllowPrivateAddresses: parseBooleanEnv(env.NOTIFICATION_ALLOW_PRIVATE_ADDRESSES, true),
     notificationDebugPayloads: parseBooleanEnv(env.NOTIFICATION_DEBUG_PAYLOADS, false),
+    auditUserHeaders: parseAuditUserHeaders(env.AUDIT_USER_HEADER),
   };
+}
+
+/**
+ * Headers a trusted reverse proxy may set to identify the authenticated user
+ * (e.g. Authelia/oauth2-proxy "Remote-User"). Used only to attribute audit-log
+ * entries; the UI itself performs no authentication.
+ */
+function parseAuditUserHeaders(raw: string | undefined): string[] {
+  const fromEnv = (raw || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  if (fromEnv.length > 0) {
+    return fromEnv;
+  }
+  return ['remote-user', 'x-forwarded-user', 'x-auth-request-user', 'x-forwarded-preferred-username'];
 }

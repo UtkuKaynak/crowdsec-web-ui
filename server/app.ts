@@ -22,6 +22,8 @@ import type {
   DashboardStatsTotals,
   DashboardWorldMapDatum,
   DecisionListItem,
+  AuditLogItem,
+  IpInvestigationResponse,
   LapiStatus,
   PaginatedResponse,
   SlimAlert,
@@ -42,6 +44,9 @@ import { collectDistinctOrigins, normalizeOrigin } from '../shared/origin';
 import { compileAlertSearch, compileDecisionSearch, type SearchParseError } from '../shared/search';
 import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type RuntimeConfig } from './config';
 import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } from './database';
+import { Analytics } from './analytics';
+import { createRdnsResolver } from './utils/rdns';
+import { getIpVersion } from './utils/ip';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -330,6 +335,9 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     debugPayloads: config.notificationDebugPayloads,
   });
 
+  const analytics = new Analytics(database);
+  const rdnsResolver = createRdnsResolver();
+
   const app = new Hono();
   const distRoot = options.distRoot || path.resolve(process.cwd(), 'dist/client');
   const staticFiles = [
@@ -477,6 +485,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }
 
       const result = await deleteAlertsByIds(ids);
+      writeAuditLog(context, 'alert.bulk_delete', null, { ids, count: ids.length });
       if (result.deleted_decisions > 0) {
         void runNotificationEvaluation('bulk alert delete');
       }
@@ -528,6 +537,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       database.deleteAlert(alertId);
       database.deleteDecisionsByAlertId(alertId);
       dashboardStatsCache = null;
+      writeAuditLog(context, 'alert.delete', alertId, {});
       return context.json((result as object) || { message: 'Deleted' });
     };
 
@@ -720,6 +730,61 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     return context.json(notificationService.listNotifications(pageRequest.page, pageRequest.pageSize));
   });
 
+  app.get(`${config.basePath}/api/audit-log`, ensureAuth, (context) => {
+    const pageRequest = getPageRequest(context) || { page: 1, pageSize: 50 };
+    const total = database.countAuditLog();
+    const rows = database.listAuditLogPage(pageRequest.page, pageRequest.pageSize);
+    const data: AuditLogItem[] = rows.map((row) => ({
+      id: row.id,
+      created_at: row.created_at,
+      actor: row.actor,
+      action: row.action,
+      target: row.target,
+      detail: parseAuditDetail(row.detail_json),
+    }));
+    return context.json({
+      data,
+      pagination: {
+        page: pageRequest.page,
+        page_size: pageRequest.pageSize,
+        total,
+        total_pages: Math.ceil(total / pageRequest.pageSize),
+        unfiltered_total: total,
+      },
+      selectable_ids: [],
+    } satisfies PaginatedResponse<AuditLogItem>);
+  });
+
+  app.get(`${config.basePath}/api/ip/:ip`, ensureAuth, async (context) => {
+    const ip = String(context.req.param('ip')).trim();
+    if (getIpVersion(ip) === null) {
+      return context.json({ error: 'Invalid IP address' }, 400);
+    }
+
+    const history = analytics.getIpHistory(ip);
+    const related = analytics.getRelatedIps(ip, { asNumber: history.asNumber });
+    const blocklists = analytics.getBlocklistMemberships(ip);
+    const rdns = await rdnsResolver.resolve(ip);
+
+    const payload: IpInvestigationResponse = {
+      ip,
+      rdns,
+      firstSeen: history.firstSeen,
+      lastSeen: history.lastSeen,
+      alertCount: history.alertCount,
+      timesBanned: history.timesBanned,
+      activeDecisions: history.activeDecisions,
+      asNumber: history.asNumber,
+      cn: history.cn,
+      cidr24: history.cidr24,
+      scenarios: history.scenarios,
+      relatedSameSubnet: related.sameSubnet,
+      relatedSameAsn: related.sameAsn,
+      blocklists,
+    };
+    return context.json(payload);
+  });
+
   app.post(`${config.basePath}/api/cleanup/by-ip`, ensureAuth, async (context) => {
     const doRequest = async () => {
       const body = await context.req.json<CleanupByIpRequest>();
@@ -729,6 +794,10 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }
 
       const result = await deleteEntriesByIp(ip);
+      writeAuditLog(context, 'cleanup.by_ip', ip, {
+        deleted_alerts: result.deleted_alerts,
+        deleted_decisions: result.deleted_decisions,
+      });
       if (result.deleted_decisions > 0) {
         void runNotificationEvaluation('cleanup by ip');
       }
@@ -1001,6 +1070,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const result = await lapiClient.addDecision(ip, type, duration, reason.slice(0, 256));
       console.log('Refreshing cache after adding decision...');
       await updateCacheDelta();
+      writeAuditLog(context, 'decision.add', ip, { type, duration, reason: reason.slice(0, 256) });
       void runNotificationEvaluation('manual decision add');
       return context.json({ message: 'Decision added (via Alert)', result });
     };
@@ -1024,6 +1094,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }
 
       const result = await deleteDecisionsByIds(ids);
+      writeAuditLog(context, 'decision.bulk_delete', null, { ids, count: ids.length });
       if (result.deleted_decisions > 0) {
         void runNotificationEvaluation('bulk decision delete');
       }
@@ -1048,6 +1119,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       console.log(`Removing decision ${decisionId} from local cache...`);
       database.deleteDecision(decisionId);
       dashboardStatsCache = null;
+      writeAuditLog(context, 'decision.delete', decisionId, {});
       void runNotificationEvaluation('decision delete');
       return context.json((result as object) || { message: 'Deleted' });
     };
@@ -1477,12 +1549,15 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       }),
     };
 
+    const asNumber = alertSource?.as_number;
     const alertData: AlertInsertParams = {
       $id: alert.id,
       $uuid: alert.uuid || String(alert.id),
       $created_at: alert.created_at,
       $scenario: alert.scenario,
       $source_ip: sourceValue,
+      $as_number: asNumber !== undefined && asNumber !== null && asNumber !== '' ? String(asNumber) : undefined,
+      $cn: alertSource?.cn || undefined,
       $message: alert.message || '',
       $raw_data: JSON.stringify(enrichedAlert),
     };
@@ -2269,6 +2344,37 @@ ${errorSummary}  Status: ${syncSummary.state}
     }
 
     await next();
+  }
+
+  function resolveAuditActor(context: HonoContext): string {
+    for (const header of config.auditUserHeaders) {
+      const value = context.req.header(header);
+      if (value && value.trim()) {
+        return value.trim().slice(0, 256);
+      }
+    }
+    return 'unknown';
+  }
+
+  function writeAuditLog(
+    context: HonoContext,
+    action: string,
+    target: string | null,
+    detail: Record<string, unknown> = {},
+  ): void {
+    try {
+      database.insertAuditLog({
+        $id: crypto.randomUUID(),
+        $created_at: new Date().toISOString(),
+        $actor: resolveAuditActor(context),
+        $action: action,
+        $target: target,
+        $detail_json: JSON.stringify(detail),
+      });
+    } catch (error) {
+      // Audit logging must never block the underlying action.
+      console.error('Failed to write audit log entry:', (error as Error)?.message);
+    }
   }
 
   async function ensureAuth(context: HonoContext, next: HonoNext): Promise<Response | void> {
@@ -3201,6 +3307,15 @@ function getNumericDecisionId(id: string | number): number {
   }
   const numeric = Number.parseInt(value, 10);
   return Number.isNaN(numeric) ? Number.POSITIVE_INFINITY : numeric;
+}
+
+function parseAuditDetail(detailJson: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(detailJson || '{}');
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function getPageRequest(context: HonoContext): PageRequest | null {

@@ -5,10 +5,10 @@ import { useI18n } from "../lib/i18n";
 
 export function Layout() {
     const { t } = useI18n();
-    const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const [theme, setTheme] = useState<'light' | 'dark' | 'darker'>(() => {
         if (typeof window !== 'undefined') {
             const savedTheme = localStorage.getItem("theme");
-            if (savedTheme === 'light' || savedTheme === 'dark') {
+            if (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'darker') {
                 return savedTheme;
             }
             if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
@@ -29,11 +29,11 @@ export function Layout() {
     });
 
     useEffect(() => {
-        if (theme === "dark") {
-            document.documentElement.classList.add("dark");
-        } else {
-            document.documentElement.classList.remove("dark");
-        }
+        const root = document.documentElement;
+        // 'darker' keeps the 'dark' class (so all dark: utilities still apply) and
+        // adds 'theme-darker', which overrides the gray palette to near-black in CSS.
+        root.classList.toggle("dark", theme === "dark" || theme === "darker");
+        root.classList.toggle("theme-darker", theme === "darker");
         localStorage.setItem("theme", theme);
     }, [theme]);
 
@@ -42,7 +42,8 @@ export function Layout() {
     }, [isMenuOpen]);
 
     const toggleTheme = () => {
-        setTheme(theme === "light" ? "dark" : "light");
+        // Cycle: light -> dark -> darker -> light
+        setTheme(theme === "light" ? "dark" : theme === "dark" ? "darker" : "light");
     };
 
     const toggleMenu = () => {
@@ -61,6 +62,8 @@ export function Layout() {
                 return t('pages.decisions.title');
             case '/notifications':
                 return t('pages.notifications.title');
+            case '/audit-log':
+                return t('pages.auditLog.title');
             default:
                 return t('pages.dashboard.title');
         }

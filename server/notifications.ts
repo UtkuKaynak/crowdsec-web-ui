@@ -1,4 +1,3 @@
-import { isIP } from 'node:net';
 import type {
   AlertDecision,
   AlertMetaValue,
@@ -34,6 +33,7 @@ import type { NotificationOutboundGuard } from './notifications/outbound-guard';
 import type { NotificationSecretStore } from './notifications/secret-store';
 import type { UpdateChecker } from './update-check';
 import { getServerTranslator, type Translator } from './i18n';
+import { cidrContainsIp, isValidIpOrCidr } from './utils/ip';
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type RuleConfigInput = NotificationRuleConfig | Record<string, AlertMetaValue>;
@@ -1108,23 +1108,6 @@ function splitIpRangeFilterValue(value: string): string[] {
   return value.split(/[\s,]+/).map((entry) => entry.trim()).filter(Boolean);
 }
 
-function isValidIpOrCidr(value: string): boolean {
-  const [address, prefix, extra] = value.split('/');
-  const version = isIP(address || '');
-  if (version === 0 || extra !== undefined) {
-    return false;
-  }
-  if (prefix === undefined) {
-    return true;
-  }
-  if (!/^\d+$/.test(prefix)) {
-    return false;
-  }
-  const numericPrefix = Number(prefix);
-  const maxPrefix = version === 4 ? 32 : 128;
-  return Number.isInteger(numericPrefix) && numericPrefix >= 0 && numericPrefix <= maxPrefix;
-}
-
 function matchesIpRangeFilters(value: string, filters: string[]): boolean {
   const normalizedValue = value.trim();
   if (!normalizedValue) {
@@ -1140,92 +1123,6 @@ function matchesIpRangeFilters(value: string, filters: string[]): boolean {
     }
   }
   return false;
-}
-
-function cidrContainsIp(cidr: string, value: string): boolean {
-  const [networkAddress, prefixText] = cidr.split('/');
-  const version = isIP(networkAddress || '');
-  if (version === 0 || isIP(value) !== version) {
-    return false;
-  }
-  const ipVersion = version === 4 ? 4 : 6;
-  const prefix = Number(prefixText);
-  const bits = ipVersion === 4 ? 32 : 128;
-  const network = parseIpAddress(networkAddress || '', ipVersion);
-  const address = parseIpAddress(value, ipVersion);
-  if (network === null || address === null || !Number.isInteger(prefix) || prefix < 0 || prefix > bits) {
-    return false;
-  }
-
-  const hostBits = BigInt(bits - prefix);
-  const mask = hostBits === BigInt(bits)
-    ? 0n
-    : ((1n << BigInt(bits)) - 1n) ^ ((1n << hostBits) - 1n);
-  return (network & mask) === (address & mask);
-}
-
-function parseIpAddress(value: string, version: 4 | 6): bigint | null {
-  return version === 4 ? parseIpv4Address(value) : parseIpv6Address(value);
-}
-
-function parseIpv4Address(value: string): bigint | null {
-  const parts = value.split('.');
-  if (parts.length !== 4) {
-    return null;
-  }
-  let result = 0n;
-  for (const part of parts) {
-    if (!/^\d+$/.test(part)) {
-      return null;
-    }
-    const octet = Number(part);
-    if (!Number.isInteger(octet) || octet < 0 || octet > 255) {
-      return null;
-    }
-    result = (result << 8n) + BigInt(octet);
-  }
-  return result;
-}
-
-function parseIpv6Address(value: string): bigint | null {
-  const normalized = value.toLowerCase();
-  const [leftText, rightText, extraText] = normalized.split('::');
-  if (extraText !== undefined) {
-    return null;
-  }
-
-  const leftParts = splitIpv6Parts(leftText || '');
-  const rightParts = rightText === undefined ? [] : splitIpv6Parts(rightText || '');
-  if (!leftParts || !rightParts) {
-    return null;
-  }
-
-  const missingParts = 8 - leftParts.length - rightParts.length;
-  if (rightText === undefined ? missingParts !== 0 : missingParts < 1) {
-    return null;
-  }
-
-  const parts = [...leftParts, ...Array.from({ length: missingParts }, () => 0), ...rightParts];
-  if (parts.length !== 8) {
-    return null;
-  }
-
-  return parts.reduce((result, part) => (result << 16n) + BigInt(part), 0n);
-}
-
-function splitIpv6Parts(value: string): number[] | null {
-  if (!value) {
-    return [];
-  }
-  const parts = value.split(':');
-  const parsed: number[] = [];
-  for (const part of parts) {
-    if (!/^[0-9a-f]{1,4}$/.test(part)) {
-      return null;
-    }
-    parsed.push(Number.parseInt(part, 16));
-  }
-  return parsed;
 }
 
 function shouldResetIncidentState(existing: NotificationRule, next: NotificationRule): boolean {
