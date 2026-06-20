@@ -443,4 +443,16 @@ export class LapiClient {
     const response = await this.fetchLapi(`/v1/alerts/${alertId}`, { method: 'DELETE' });
     return response.data;
   }
+
+  // Allowlists are read-only over LAPI (no write endpoint exists; management is
+  // done with `cscli allowlists ...` on the engine host).
+  async getAllowlists(): Promise<unknown> {
+    const response = await this.fetchLapi('/v1/allowlists?with_content=true');
+    return response.data;
+  }
+
+  async checkAllowlist(ip: string): Promise<unknown> {
+    const response = await this.fetchLapi(`/v1/allowlists/check/${encodeURIComponent(ip)}`);
+    return response.data;
+  }
 }

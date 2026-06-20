@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, ShieldAlert, Gavel, Bell, X, Sun, Moon, MoonStar, ArrowUpCircle, Menu, PanelLeftClose, Globe2, ScrollText, Flame } from "lucide-react";
+import { LayoutDashboard, ShieldAlert, Gavel, Bell, X, Sun, Moon, MoonStar, ArrowUpCircle, Menu, PanelLeftClose, Globe2, ScrollText, Flame, ShieldCheck } from "lucide-react";
 import { Badge } from "./ui/Badge";
 import { useNotificationUnreadCount } from "../contexts/useNotificationUnreadCount";
 import { useRefresh } from "../contexts/useRefresh";
@@ -73,6 +73,7 @@ export function Sidebar({ isOpen, onClose, onToggle, theme, toggleTheme }: Sideb
         { to: "/incidents", label: "components.sidebar.nav.incidents", icon: Flame },
         { to: "/alerts", label: "components.sidebar.nav.alerts", icon: ShieldAlert },
         { to: "/decisions", label: "components.sidebar.nav.decisions", icon: Gavel },
+        { to: "/self-protection", label: "components.sidebar.nav.selfProtection", icon: ShieldCheck },
         { to: "/notifications", label: "components.sidebar.nav.notifications", icon: Bell },
         { to: "/audit-log", label: "components.sidebar.nav.auditLog", icon: ScrollText },
     ];

@@ -23,10 +23,16 @@ import type {
   DashboardWorldMapDatum,
   DecisionListItem,
   AuditLogItem,
+  AllowlistCheckResponse,
+  AllowlistItemView,
+  AllowlistsResponse,
+  AllowlistView,
   IncidentsResponse,
   IpInvestigationResponse,
+  KnownGoodEntry,
   LapiStatus,
   PaginatedResponse,
+  SelfProtectionResponse,
   SlimAlert,
   StatsAlert,
   StatsDecision,
@@ -48,7 +54,7 @@ import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } f
 import { Analytics } from './analytics';
 import { createRdnsResolver } from './utils/rdns';
 import { createRdapResolver } from './utils/rdap';
-import { getIpVersion } from './utils/ip';
+import { getIpVersion, isValidIpOrCidr } from './utils/ip';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -816,6 +822,72 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     const lastViewedAt = new Date().toISOString();
     database.setMeta(INCIDENTS_LAST_VIEWED_KEY, lastViewedAt);
     return context.json({ lastViewedAt });
+  });
+
+  const KNOWN_GOOD_KEY = 'self_protection_known_good';
+  const ALLOWLIST_SUGGESTED_NAME = 'crowdsec-web-ui';
+
+  function getKnownGood(): KnownGoodEntry[] {
+    const stored = database.getMeta(KNOWN_GOOD_KEY)?.value;
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return sanitizeKnownGood(parsed);
+        }
+      } catch {
+        // fall through to seed
+      }
+    }
+    const seeded = parseKnownGoodSeed(config.selfProtectionKnownGood);
+    if (seeded.length > 0) {
+      database.setMeta(KNOWN_GOOD_KEY, JSON.stringify(seeded));
+    }
+    return seeded;
+  }
+
+  app.get(`${config.basePath}/api/self-protection`, ensureAuth, (context) => {
+    const knownGood = getKnownGood();
+    const flagged = analytics.getKnownGoodHits(knownGood);
+    return context.json({ knownGood, flagged } satisfies SelfProtectionResponse);
+  });
+
+  app.put(`${config.basePath}/api/self-protection/known-good`, ensureAuth, async (context) => {
+    const body = await context.req.json<{ knownGood?: unknown }>();
+    if (!Array.isArray(body.knownGood)) {
+      return context.json({ error: 'knownGood must be an array' }, 400);
+    }
+    const sanitized = sanitizeKnownGood(body.knownGood);
+    database.setMeta(KNOWN_GOOD_KEY, JSON.stringify(sanitized));
+    const flagged = analytics.getKnownGoodHits(sanitized);
+    return context.json({ knownGood: sanitized, flagged } satisfies SelfProtectionResponse);
+  });
+
+  app.get(`${config.basePath}/api/allowlists`, ensureAuth, async (context) => {
+    try {
+      const raw = await lapiClient.getAllowlists();
+      return context.json({
+        available: true,
+        allowlists: normalizeAllowlists(raw),
+        suggestedName: ALLOWLIST_SUGGESTED_NAME,
+      } satisfies AllowlistsResponse);
+    } catch {
+      // Read may be unsupported/forbidden on some engines — degrade gracefully.
+      return context.json({ available: false, allowlists: [], suggestedName: ALLOWLIST_SUGGESTED_NAME } satisfies AllowlistsResponse);
+    }
+  });
+
+  app.get(`${config.basePath}/api/allowlists/check/:ip`, ensureAuth, async (context) => {
+    const ip = String(context.req.param('ip')).trim();
+    if (getIpVersion(ip) === null) {
+      return context.json({ error: 'Invalid IP address' }, 400);
+    }
+    try {
+      const detail = await lapiClient.checkAllowlist(ip);
+      return context.json({ ip, allowlisted: isAllowlistHit(detail), detail } satisfies AllowlistCheckResponse);
+    } catch {
+      return context.json({ ip, allowlisted: false, detail: null } satisfies AllowlistCheckResponse);
+    }
   });
 
   app.post(`${config.basePath}/api/cleanup/by-ip`, ensureAuth, async (context) => {
@@ -3340,6 +3412,75 @@ function getNumericDecisionId(id: string | number): number {
   }
   const numeric = Number.parseInt(value, 10);
   return Number.isNaN(numeric) ? Number.POSITIVE_INFINITY : numeric;
+}
+
+function sanitizeKnownGood(input: unknown[]): KnownGoodEntry[] {
+  const seen = new Set<string>();
+  const result: KnownGoodEntry[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as Partial<KnownGoodEntry>;
+    const value = String(entry.value ?? '').trim();
+    const kind = entry.kind === 'asn' ? 'asn' : 'cidr';
+    if (!value) continue;
+    if (kind === 'cidr' && !isValidIpOrCidr(value)) continue;
+    if (kind === 'asn' && !/^\d+$/.test(value)) continue;
+    const dedupeKey = `${kind}:${value}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    result.push({ value, kind, label: String(entry.label ?? '').trim().slice(0, 100) });
+  }
+  return result;
+}
+
+function parseKnownGoodSeed(raw: string): KnownGoodEntry[] {
+  // Format: comma-separated "value=label", value is a CIDR/IP or "AS####".
+  const entries = raw
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const [valuePart, ...labelParts] = token.split('=');
+      const rawValue = valuePart.trim();
+      const label = labelParts.join('=').trim();
+      const asnMatch = rawValue.match(/^[Aa][Ss](\d+)$/);
+      if (asnMatch) {
+        return { value: asnMatch[1], kind: 'asn' as const, label };
+      }
+      if (/^\d+$/.test(rawValue)) {
+        return { value: rawValue, kind: 'asn' as const, label };
+      }
+      return { value: rawValue, kind: 'cidr' as const, label };
+    });
+  return sanitizeKnownGood(entries);
+}
+
+function normalizeAllowlists(raw: unknown): AllowlistView[] {
+  const list = Array.isArray(raw) ? raw : [];
+  return list.map((entry) => {
+    const obj = (entry ?? {}) as Record<string, unknown>;
+    const rawItems = Array.isArray(obj.items) ? obj.items : [];
+    const items: AllowlistItemView[] = rawItems.map((item) => {
+      const it = (item ?? {}) as Record<string, unknown>;
+      return {
+        value: String(it.value ?? it.ip ?? ''),
+        description: it.description != null ? String(it.description) : null,
+        expiration: it.expiration != null ? String(it.expiration) : null,
+      };
+    }).filter((it) => it.value);
+    return {
+      name: String(obj.name ?? ''),
+      description: obj.description != null ? String(obj.description) : null,
+      items,
+    };
+  });
+}
+
+function isAllowlistHit(detail: unknown): boolean {
+  if (detail == null || detail === false || detail === '') return false;
+  if (Array.isArray(detail)) return detail.length > 0;
+  if (typeof detail === 'object') return Object.keys(detail as object).length > 0;
+  return Boolean(detail);
 }
 
 function parseWindowHours(raw: string | undefined): number {
