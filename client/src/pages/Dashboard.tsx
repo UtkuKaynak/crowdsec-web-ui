@@ -6,6 +6,7 @@ import { useRefresh } from "../contexts/useRefresh";
 import { Card, CardContent } from "../components/ui/Card";
 import { StatCard } from "../components/StatCard";
 import { ScenarioName } from "../components/ScenarioName";
+import { InsightsStrip } from "../components/InsightsStrip";
 import {
     ShieldAlert,
     Gavel,
@@ -525,6 +526,7 @@ export function Dashboard() {
 
     return (
         <div className="space-y-8">
+            <InsightsStrip />
             {/* Summary Cards */}
             <div className="grid grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
                 <Link to={alertsLink} className="block h-full transition-transform hover:scale-105">

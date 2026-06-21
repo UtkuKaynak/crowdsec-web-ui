@@ -16,6 +16,20 @@
 
 A modern, responsive web interface for managing [CrowdSec](https://crowdsec.net/) alerts and decisions. Built with **React**, **Vite**, **Node.js**, and **Tailwind CSS**.
 
+> [!NOTE]
+> **This is a personal fork** of the upstream [crowdsec-web-ui](https://github.com/TheDuffman85/crowdsec-web-ui), with some extra features I wanted for my own setup. I'm not a security expert, and a lot of this was "vibe coded" with an AI assistant for hobby purposes — please read the code and test it yourself before relying on it. No guarantees or support.
+>
+> **Added in this fork (high level):**
+> - **Incidents** — groups related alerts (by scenario and /24) into a shorter list, with a volume-vs-baseline hint and a "new since last visit" marker.
+> - **IP investigation** — a per-IP page with local history, related IPs in the same /24 and ASN, reverse DNS, RDAP owner/abuse contact, blocklist cross-reference, and links to external threat-intel sites.
+> - **ASN & subnet pages** — the same view aggregated for a whole ASN or subnet, with optional bulk ban.
+> - **Self-protection** — flags active bans that land on an allowlisted IP, and warns before you manually ban one. (Allowlists are read-only over the API, so changes are surfaced as a `cscli` command to run on the engine.)
+> - **Insights** — repeat offenders, and how much your local bans overlap with community blocklists.
+> - **Audit log** — records ban/unban/delete actions taken through the UI.
+> - **Misc** — CSV export on the analytics tables, a darker (OLED) theme, and a small deploy script (`deploy/update.sh`).
+>
+> Everything is local analytics over the data the UI already caches, plus optional reverse-DNS/RDAP lookups; nothing here replaces proper CrowdSec configuration.
+
 > [!IMPORTANT]
 > **Improved Performance & Better Scale**: Recent backend and caching improvements significantly reduce resource pressure and improve responsiveness across the application. CrowdSec Web UI now also supports larger-scale deployments more reliably, including environments with multiple machines and high alert or decision volumes.
 

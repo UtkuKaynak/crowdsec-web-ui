@@ -30,6 +30,7 @@ type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok:
 
 export interface RdapResolver {
   lookup(ip: string): Promise<WhoisResult | null>;
+  lookupAutnum(asn: string): Promise<WhoisResult | null>;
 }
 
 export function createRdapResolver(options: {
@@ -46,39 +47,51 @@ export function createRdapResolver(options: {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const cache = new Map<string, CacheEntry>();
 
+  async function fetchCached(cacheKey: string, url: string): Promise<WhoisResult | null> {
+    if (!enabled || typeof fetchImpl !== 'function') {
+      return null;
+    }
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > now()) {
+      return cached.value;
+    }
+
+    let value: WhoisResult | null = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(url, { signal: controller.signal });
+      if (response.ok) {
+        value = parseRdap(await response.json());
+      }
+    } catch {
+      value = null;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (cache.size >= MAX_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        cache.delete(oldestKey);
+      }
+    }
+    cache.set(cacheKey, { value, expiresAt: now() + ttlMs });
+    return value;
+  }
+
   return {
     async lookup(ip: string): Promise<WhoisResult | null> {
-      if (!enabled || getIpVersion(ip) === null || typeof fetchImpl !== 'function') {
+      if (getIpVersion(ip) === null) {
         return null;
       }
-
-      const cached = cache.get(ip);
-      if (cached && cached.expiresAt > now()) {
-        return cached.value;
+      return fetchCached(`ip:${ip}`, `${RDAP_BASE}${encodeURIComponent(ip)}`);
+    },
+    async lookupAutnum(asn: string): Promise<WhoisResult | null> {
+      if (!/^\d+$/.test(asn)) {
+        return null;
       }
-
-      let value: WhoisResult | null = null;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(`${RDAP_BASE}${encodeURIComponent(ip)}`, { signal: controller.signal });
-        if (response.ok) {
-          value = parseRdap(await response.json());
-        }
-      } catch {
-        value = null;
-      } finally {
-        clearTimeout(timer);
-      }
-
-      if (cache.size >= MAX_ENTRIES) {
-        const oldestKey = cache.keys().next().value;
-        if (oldestKey !== undefined) {
-          cache.delete(oldestKey);
-        }
-      }
-      cache.set(ip, { value, expiresAt: now() + ttlMs });
-      return value;
+      return fetchCached(`as:${asn}`, `https://rdap.org/autnum/${encodeURIComponent(asn)}`);
     },
   };
 }

@@ -16,6 +16,8 @@ const AuditLog = lazy(async () => ({ default: (await import('./pages/AuditLog'))
 const IpInvestigation = lazy(async () => ({ default: (await import('./pages/IpInvestigation')).IpInvestigation }));
 const Incidents = lazy(async () => ({ default: (await import('./pages/Incidents')).Incidents }));
 const SelfProtection = lazy(async () => ({ default: (await import('./pages/SelfProtection')).SelfProtection }));
+const NetworkOverview = lazy(async () => ({ default: (await import('./pages/NetworkOverview')).NetworkOverview }));
+const Insights = lazy(async () => ({ default: (await import('./pages/Insights')).Insights }));
 
 function RouteFallback() {
   const { t } = useI18n();
@@ -82,6 +84,14 @@ function AppContent() {
               )}
             />
             <Route
+              path="insights"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <Insights />
+                </Suspense>
+              )}
+            />
+            <Route
               path="audit-log"
               element={(
                 <Suspense fallback={<RouteFallback />}>
@@ -94,6 +104,22 @@ function AppContent() {
               element={(
                 <Suspense fallback={<RouteFallback />}>
                   <IpInvestigation />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="asn/:asn"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <NetworkOverview kind="asn" />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="subnet/:cidr"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <NetworkOverview kind="subnet" />
                 </Suspense>
               )}
             />

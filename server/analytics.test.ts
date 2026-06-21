@@ -95,8 +95,8 @@ describe('Analytics.getIncidents', () => {
   });
 });
 
-describe('Analytics.getKnownGoodHits', () => {
-  // getKnownGoodHits uses the real current time, so the ban must end in the real future.
+describe('Analytics.getAllowlistConflicts', () => {
+  // getAllowlistConflicts uses the real current time, so the ban must end in the real future.
   const future = new Date(Date.now() + 3_600_000).toISOString();
 
   function activeDecision(db: CrowdsecDatabase, id: string, value: string): void {
@@ -108,31 +108,101 @@ describe('Analytics.getKnownGoodHits', () => {
     });
   }
 
-  test('matches active bans against known-good CIDRs and ASNs', () => {
+  test('flags active bans whose IP is in an allowlist (exact or CIDR)', () => {
     const db = createDb();
     const analytics = new Analytics(db);
 
-    activeDecision(db, 'd1', '10.0.0.5');   // inside a known-good /24
-    activeDecision(db, 'd2', '8.8.8.8');    // belongs to a known-good ASN
-    activeDecision(db, 'd3', '203.0.113.7'); // not known-good
+    activeDecision(db, 'd1', '10.0.0.5');     // inside an allowlisted /24
+    activeDecision(db, 'd2', '1.2.3.4');      // exact allowlisted IP
+    activeDecision(db, 'd3', '203.0.113.7');  // not allowlisted
 
-    // 8.8.8.8 needs an alert row so its ASN can be resolved.
-    db.insertAlert({
-      $id: 1, $uuid: 'a1', $created_at: '2026-01-09T00:00:00.000Z',
-      $scenario: 'crowdsecurity/ssh-bf', $source_ip: '8.8.8.8', $as_number: '15169', $cn: 'US',
-      $message: 'x', $raw_data: '{}',
-    });
-
-    const hits = analytics.getKnownGoodHits([
-      { value: '10.0.0.0/24', kind: 'cidr', label: 'office VPN' },
-      { value: '15169', kind: 'asn', label: 'Google' },
+    const conflicts = analytics.getAllowlistConflicts([
+      { value: '10.0.0.0/24', allowlist: 'office' },
+      { value: '1.2.3.4', allowlist: 'monitors' },
     ]);
 
-    const byValue = new Map(hits.map((h) => [h.value, h]));
-    expect(byValue.get('10.0.0.5')?.matchedLabel).toBe('office VPN');
-    expect(byValue.get('8.8.8.8')?.matchedKind).toBe('asn');
+    const byValue = new Map(conflicts.map((c) => [c.value, c]));
+    expect(byValue.get('10.0.0.5')?.matchedAllowlist).toBe('office');
+    expect(byValue.get('1.2.3.4')?.matchedValue).toBe('1.2.3.4');
     expect(byValue.has('203.0.113.7')).toBe(false);
-    expect(hits).toHaveLength(2);
+    expect(conflicts).toHaveLength(2);
+
+    db.close();
+  });
+});
+
+describe('Analytics network overviews', () => {
+  test('getAsnOverview and getSubnetOverview aggregate IPs and scenarios', () => {
+    const db = createDb();
+    const analytics = new Analytics(db);
+    const insert = (id: number, ip: string, scenario: string, asn: string) => db.insertAlert({
+      $id: id, $uuid: `a${id}`, $created_at: '2026-01-09T00:00:00.000Z',
+      $scenario: scenario, $source_ip: ip, $as_number: asn, $cn: 'US', $message: 'x', $raw_data: '{}',
+    });
+
+    insert(1, '1.2.3.10', 'crowdsecurity/ssh-bf', '64500');
+    insert(2, '1.2.3.10', 'crowdsecurity/ssh-bf', '64500'); // same IP again
+    insert(3, '1.2.3.11', 'crowdsecurity/http-probing', '64500'); // same /24 + ASN
+    insert(4, '9.9.9.9', 'crowdsecurity/ssh-bf', '64500'); // same ASN, different /24
+
+    const asn = analytics.getAsnOverview('64500');
+    expect(asn.kind).toBe('asn');
+    expect(asn.ipCount).toBe(3);            // .10, .11, 9.9.9.9
+    expect(asn.alertCount).toBe(4);
+    expect(asn.ips[0].ip).toBe('1.2.3.10'); // most alerts first
+
+    const subnet = analytics.getSubnetOverview('1.2.3.0/24');
+    expect(subnet).not.toBeNull();
+    expect(subnet!.kind).toBe('subnet');
+    expect(subnet!.ipCount).toBe(2);        // .10 and .11 only
+    expect(subnet!.alertCount).toBe(3);
+    expect(subnet!.scenarios.map((s) => s.scenario).sort()).toEqual(['crowdsecurity/http-probing', 'crowdsecurity/ssh-bf']);
+
+    expect(analytics.getSubnetOverview('not-a-cidr')).toBeNull();
+
+    db.close();
+  });
+});
+
+describe('Analytics insights', () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+  const past = new Date(Date.now() - 3_600_000).toISOString();
+
+  function decision(db: CrowdsecDatabase, id: string, value: string, origin: string, stopAt: string): void {
+    db.insertDecision({
+      $id: id, $uuid: id, $alert_id: 0, $created_at: '2026-01-09T00:00:00.000Z', $stop_at: stopAt,
+      $value: value, $type: 'ban', $origin: origin, $scenario: 'crowdsecurity/ssh-bf', $raw_data: '{}',
+    });
+  }
+
+  test('getRepeatOffenders surfaces IPs banned multiple times', () => {
+    const db = createDb();
+    const analytics = new Analytics(db);
+    decision(db, 'a1', '1.2.3.4', 'crowdsec', past);    // banned twice
+    decision(db, 'a2', '1.2.3.4', 'crowdsec', future);
+    decision(db, 'b1', '5.6.7.8', 'crowdsec', future);  // banned once
+    db.insertAlert({ $id: 1, $uuid: 'al1', $created_at: '2026-01-09T00:00:00.000Z', $scenario: 's', $source_ip: '1.2.3.4', $as_number: '64500', $cn: 'US', $message: 'x', $raw_data: '{}' });
+
+    const offenders = analytics.getRepeatOffenders(2, 100);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0]).toMatchObject({ ip: '1.2.3.4', banCount: 2, active: true, asn: '64500', cn: 'US' });
+
+    db.close();
+  });
+
+  test('getBlocklistOverlap counts local vs community and their intersection', () => {
+    const db = createDb();
+    const analytics = new Analytics(db);
+    decision(db, 'l1', '1.1.1.1', 'crowdsec', future);  // local only
+    decision(db, 'c1', '2.2.2.2', 'lists', future);     // community only
+    decision(db, 'l3', '3.3.3.3', 'crowdsec', future);  // both
+    decision(db, 'c3', '3.3.3.3', 'CAPI', future);
+
+    const overlap = analytics.getBlocklistOverlap();
+    expect(overlap.localIps).toBe(2);       // 1.1.1.1, 3.3.3.3
+    expect(overlap.communityIps).toBe(2);   // 2.2.2.2, 3.3.3.3
+    expect(overlap.overlap).toBe(1);        // 3.3.3.3
+    expect(overlap.overlapIps).toContain('3.3.3.3');
 
     db.close();
   });

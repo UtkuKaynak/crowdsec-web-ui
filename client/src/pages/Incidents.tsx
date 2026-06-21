@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ArrowUpRight, Ban, CheckCheck, Flame, TrendingUp } from 'lucide-react';
+import { AlertCircle, ArrowUpRight, CheckCheck, Download, Flame, TrendingUp } from 'lucide-react';
 import { fetchIncidents, markIncidentsSeen } from '../lib/api';
 import { useRefresh } from '../contexts/useRefresh';
 import { Badge } from '../components/ui/Badge';
 import { ScenarioName } from '../components/ScenarioName';
 import { getCountryName } from '../lib/utils';
+import { exportCsv } from '../lib/csv';
 import { useI18n } from '../lib/i18n';
 import type { IncidentItem, IncidentsResponse } from '../types';
 
 const WINDOWS = ['24h', '48h', '7d', '30d'];
+const DEFAULT_MIN_ALERTS = 10;
 
 function relativeTime(iso: string, t: ReturnType<typeof useI18n>['t']): string {
     const diffMs = Date.now() - new Date(iso).getTime();
@@ -31,15 +33,16 @@ export function Incidents() {
     const { t } = useI18n();
     const { refreshSignal } = useRefresh();
     const [range, setRange] = useState('24h');
+    const [minAlerts, setMinAlerts] = useState(DEFAULT_MIN_ALERTS);
     const [data, setData] = useState<IncidentsResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    const load = useCallback(async (win: string) => {
+    const load = useCallback(async (win: string, min: number) => {
         setLoading(true);
         setError(null);
         try {
-            setData(await fetchIncidents(win));
+            setData(await fetchIncidents(win, min));
         } catch (err) {
             setError(err instanceof Error ? err.message : t('pages.incidents.loadError'));
         } finally {
@@ -48,14 +51,14 @@ export function Incidents() {
     }, [t]);
 
     useEffect(() => {
-        const timeoutId = window.setTimeout(() => { void load(range); }, 0);
+        const timeoutId = window.setTimeout(() => { void load(range, minAlerts); }, 0);
         return () => window.clearTimeout(timeoutId);
-    }, [load, range, refreshSignal]);
+    }, [load, range, minAlerts, refreshSignal]);
 
     const handleMarkSeen = async () => {
         try {
             await markIncidentsSeen();
-            await load(range);
+            await load(range, minAlerts);
         } catch {
             // best-effort; ignore
         }
@@ -64,11 +67,37 @@ export function Incidents() {
     const incidents = data?.incidents ?? [];
     const hasNewSinceVisit = incidents.some((i) => i.isNewSinceLastView);
 
+    const handleExport = () => {
+        exportCsv(`incidents-${range}`, incidents, [
+            { key: 'scenario', label: 'Scenario' },
+            { key: 'cidr', label: 'Subnet' },
+            { key: 'asn', label: 'ASN' },
+            { key: 'country', label: 'Country' },
+            { key: 'ipCount', label: 'IPs' },
+            { key: 'alertCount', label: 'Alerts' },
+            { key: 'activeBans', label: 'Active bans' },
+            { key: 'firstSeen', label: 'First seen' },
+            { key: 'lastSeen', label: 'Last seen' },
+            { key: 'isNew', label: 'New scenario' },
+            { key: 'ratioVsBaseline', label: 'Ratio vs baseline', value: (i) => i.ratioVsBaseline?.toFixed(2) ?? '' },
+        ]);
+    };
+
     return (
-        <div className="space-y-6">
+        <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-gray-500 dark:text-gray-400">{t('pages.incidents.description')}</p>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400">
+                        {t('pages.incidents.minAlerts')}
+                        <input
+                            type="number"
+                            min={1}
+                            value={minAlerts}
+                            onChange={(e) => setMinAlerts(Math.max(1, Number.parseInt(e.target.value, 10) || 1))}
+                            className="w-16 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 text-sm rounded-md px-2 py-1.5"
+                        />
+                    </label>
                     <select
                         value={range}
                         onChange={(e) => setRange(e.target.value)}
@@ -84,10 +113,17 @@ export function Incidents() {
                             onClick={handleMarkSeen}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition-colors"
                         >
-                            <CheckCheck size={16} />
-                            {t('pages.incidents.markSeen')}
+                            <CheckCheck size={16} />{t('pages.incidents.markSeen')}
                         </button>
                     )}
+                    <button
+                        type="button"
+                        onClick={handleExport}
+                        disabled={incidents.length === 0}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        <Download size={16} />{t('common.exportCsv')}
+                    </button>
                 </div>
             </div>
 
@@ -99,7 +135,7 @@ export function Incidents() {
 
             {data && !loading && (
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {t('pages.incidents.summary', { incidents: incidents.length, alerts: data.totalAlerts, window: range })}
+                    {t('pages.incidents.summaryFiltered', { incidents: incidents.length, min: minAlerts, alerts: data.totalAlerts, window: range })}
                 </p>
             )}
 
@@ -111,78 +147,57 @@ export function Incidents() {
                     <span className="text-sm">{t('pages.incidents.empty')}</span>
                 </div>
             ) : (
-                <div className="space-y-3">
-                    {incidents.map((incident) => {
-                        const ratio = incident.ratioVsBaseline;
-                        const showRatio = ratio != null && ratio >= 1.5 && !incident.isNew;
-                        return (
-                            <div
-                                key={incident.key}
-                                className={`bg-white dark:bg-gray-800 rounded-xl shadow-sm border p-4 ${incident.isNewSinceLastView
-                                    ? 'border-primary-300 dark:border-primary-700 ring-1 ring-primary-200 dark:ring-primary-900'
-                                    : 'border-gray-200 dark:border-gray-700'}`}
-                            >
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                        <div className="flex flex-wrap items-center gap-2 mb-1">
-                                            <ScenarioName name={incident.scenario} showLink />
-                                            {incident.isNew && (
-                                                <Badge variant="info" className="flex items-center gap-1"><Flame size={10} />{t('pages.incidents.newScenario')}</Badge>
-                                            )}
-                                            {showRatio && (
-                                                <Badge variant="danger" className="flex items-center gap-1">
-                                                    <TrendingUp size={10} />{t('pages.incidents.ratio', { ratio: ratio!.toFixed(1) })}
-                                                </Badge>
-                                            )}
-                                            {incident.isNewSinceLastView && (
-                                                <Badge variant="warning">{t('pages.incidents.newSinceVisit')}</Badge>
-                                            )}
-                                        </div>
-                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
-                                            <span className="font-mono text-gray-700 dark:text-gray-300">{incident.cidr}</span>
-                                            {incident.country && (
-                                                <span className="inline-flex items-center gap-1">
-                                                    <span className={`fi fi-${incident.country.toLowerCase()}`} />{getCountryName(incident.country)}
-                                                </span>
-                                            )}
-                                            {incident.asn && <span>AS{incident.asn}</span>}
-                                            <span>{relativeTime(incident.lastSeen, t)}</span>
-                                        </div>
-                                    </div>
-                                    <Link
-                                        to={alertsLink(incident)}
-                                        className="inline-flex items-center gap-1 text-sm text-primary-600 dark:text-primary-400 hover:underline flex-shrink-0"
-                                    >
-                                        {t('pages.incidents.viewAlerts')}<ArrowUpRight size={14} />
-                                    </Link>
-                                </div>
-
-                                <div className="flex flex-wrap items-center gap-4 mt-3 text-sm">
-                                    <span className="text-gray-700 dark:text-gray-200"><span className="font-semibold">{incident.alertCount}</span> {t('pages.incidents.alerts')}</span>
-                                    <span className="text-gray-700 dark:text-gray-200"><span className="font-semibold">{incident.ipCount}</span> {t('pages.incidents.ips')}</span>
-                                    {incident.activeBans > 0 && (
-                                        <span className="inline-flex items-center gap-1 text-red-600 dark:text-red-400">
-                                            <Ban size={13} /><span className="font-semibold">{incident.activeBans}</span> {t('pages.incidents.activeBans')}
-                                        </span>
-                                    )}
-                                </div>
-
-                                {incident.topIps.length > 0 && (
-                                    <div className="flex flex-wrap gap-1.5 mt-2">
-                                        {incident.topIps.map((top) => (
-                                            <Link
-                                                key={top.ip}
-                                                to={`/ip/${encodeURIComponent(top.ip)}`}
-                                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono bg-gray-100 dark:bg-gray-700/50 text-primary-600 dark:text-primary-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-                                            >
-                                                {top.ip}<span className="text-gray-400">×{top.count}</span>
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                        <thead className="bg-gray-50 dark:bg-gray-900/50 text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                            <tr>
+                                <th className="px-4 py-3 font-semibold">{t('pages.incidents.colScenario')}</th>
+                                <th className="px-4 py-3 font-semibold">{t('pages.incidents.colSubnet')}</th>
+                                <th className="px-4 py-3 font-semibold">{t('pages.incidents.colAsn')}</th>
+                                <th className="px-4 py-3 font-semibold text-right">{t('pages.incidents.alerts')}</th>
+                                <th className="px-4 py-3 font-semibold text-right">{t('pages.incidents.ips')}</th>
+                                <th className="px-4 py-3 font-semibold text-right">{t('pages.incidents.colBans')}</th>
+                                <th className="px-4 py-3 font-semibold">{t('pages.incidents.colLastSeen')}</th>
+                                <th className="px-4 py-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+                            {incidents.map((incident) => {
+                                const ratio = incident.ratioVsBaseline;
+                                const showRatio = ratio != null && ratio >= 1.5 && !incident.isNew;
+                                return (
+                                    <tr key={incident.key} className={`hover:bg-gray-50 dark:hover:bg-gray-700/30 ${incident.isNewSinceLastView ? 'bg-primary-50/40 dark:bg-primary-900/10' : ''}`}>
+                                        <td className="px-4 py-3">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <ScenarioName name={incident.scenario} showLink />
+                                                {incident.isNew && <Badge variant="info" className="flex items-center gap-1"><Flame size={10} />{t('pages.incidents.newScenario')}</Badge>}
+                                                {showRatio && <Badge variant="danger" className="flex items-center gap-1"><TrendingUp size={10} />{t('pages.incidents.ratio', { ratio: ratio!.toFixed(1) })}</Badge>}
+                                                {incident.isNewSinceLastView && <Badge variant="warning">{t('pages.incidents.newSinceVisit')}</Badge>}
+                                            </div>
+                                        </td>
+                                        <td className="px-4 py-3 font-mono text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                                            <Link to={`/subnet/${encodeURIComponent(incident.cidr.replace(/\//g, '_'))}`} className="text-primary-600 dark:text-primary-400 hover:underline">{incident.cidr}</Link>
+                                            {incident.country && <span className={`fi fi-${incident.country.toLowerCase()} ml-2`} title={getCountryName(incident.country) ?? undefined} />}
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-gray-600 dark:text-gray-300">
+                                            {incident.asn ? <Link to={`/asn/${encodeURIComponent(incident.asn)}`} className="text-primary-600 dark:text-primary-400 hover:underline">AS{incident.asn}</Link> : '—'}
+                                        </td>
+                                        <td className="px-4 py-3 text-right font-semibold text-gray-800 dark:text-gray-200">{incident.alertCount}</td>
+                                        <td className="px-4 py-3 text-right text-gray-700 dark:text-gray-300">{incident.ipCount}</td>
+                                        <td className="px-4 py-3 text-right">
+                                            {incident.activeBans > 0 ? <span className="text-red-600 dark:text-red-400 font-semibold">{incident.activeBans}</span> : <span className="text-gray-400">0</span>}
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-gray-500 dark:text-gray-400">{relativeTime(incident.lastSeen, t)}</td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                                            <Link to={alertsLink(incident)} className="inline-flex items-center gap-1 text-primary-600 dark:text-primary-400 hover:underline">
+                                                {t('pages.incidents.viewAlerts')}<ArrowUpRight size={13} />
                                             </Link>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
                 </div>
             )}
         </div>

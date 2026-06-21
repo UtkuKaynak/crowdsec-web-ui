@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, type FormEvent } from "react";
 import { useSearchParams, Link } from "react-router-dom";
-import { deleteDecision, bulkDeleteDecisions, cleanupByIp, addDecision, fetchConfig, fetchDecisionsPaginated, updateTableColumns } from "../lib/api";
+import { deleteDecision, bulkDeleteDecisions, cleanupByIp, addDecision, checkAllowlist, fetchConfig, fetchDecisionsPaginated, updateTableColumns } from "../lib/api";
 import { isSimulatedDecision, parseSimulationFilter } from "../lib/simulation";
 import { useRefresh } from "../contexts/useRefresh";
 import { Badge } from "../components/ui/Badge";
@@ -14,7 +14,7 @@ import { getCountryName } from "../lib/utils";
 import { useTableColumnViewport } from "../lib/useTableColumnViewport";
 import { DEFAULT_TABLE_COLUMN_PREFERENCES, TABLE_COLUMN_DEFINITIONS } from "../../../shared/contracts";
 import { compileDecisionSearch, getSearchHelpDefinition, type SearchParseError } from "../../../shared/search";
-import { Trash2, Gavel, X, ExternalLink, Shield, ShieldBan, AlertCircle, Info, Columns3 } from "lucide-react";
+import { Trash2, Gavel, X, ExternalLink, Shield, ShieldBan, AlertCircle, Info, Columns3, TriangleAlert } from "lucide-react";
 import type { AddDecisionRequest, ApiPermissionError, BulkDeleteResult, DecisionListItem, TableColumnId, TableColumnPreferences, TableColumnViewportPreferences } from '../types';
 import { useI18n, type I18nContextValue } from "../lib/i18n";
 
@@ -128,6 +128,7 @@ export function Decisions() {
     const [pendingDeleteErrorInfo, setPendingDeleteErrorInfo] = useState<ErrorInfo | null>(null);
     const [addDecisionErrorInfo, setAddDecisionErrorInfo] = useState<ErrorInfo | null>(null);
     const [addDecisionInProgress, setAddDecisionInProgress] = useState(false);
+    const [addIpAllowlisted, setAddIpAllowlisted] = useState(false);
     const tableColumnViewport = useTableColumnViewport();
     const alertIdFilter = searchParams.get("alert_id");
     const queryParam = searchParams.get("q");
@@ -500,6 +501,21 @@ export function Decisions() {
             setAddDecisionInProgress(false);
         }
     };
+
+    // Footgun guard: warn when the IP about to be banned is already allowlisted.
+    useEffect(() => {
+        const ip = newDecision.ip.trim();
+        const id = window.setTimeout(() => {
+            if (!showAddModal || !ip || ip.includes('/')) {
+                setAddIpAllowlisted(false);
+                return;
+            }
+            void checkAllowlist(ip)
+                .then((r) => setAddIpAllowlisted(r.allowlisted))
+                .catch(() => setAddIpAllowlisted(false));
+        }, 400);
+        return () => window.clearTimeout(id);
+    }, [newDecision.ip, showAddModal]);
 
     const openAddDecision = () => {
         setAddDecisionErrorInfo(null);
@@ -1119,6 +1135,12 @@ export function Decisions() {
                             value={newDecision.ip}
                             onChange={e => setNewDecision({ ...newDecision, ip: e.target.value })}
                         />
+                        {addIpAllowlisted && (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                                <TriangleAlert size={13} className="flex-shrink-0" />
+                                {t('pages.decisions.allowlistedWarning')}
+                            </p>
+                        )}
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('pages.decisions.duration')}</label>

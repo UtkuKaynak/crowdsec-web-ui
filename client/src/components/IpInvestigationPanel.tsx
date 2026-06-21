@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ArrowUpRight, Ban, CheckCircle2, ExternalLink, Network, ShieldAlert } from 'lucide-react';
+import { AlertCircle, ArrowUpRight, Ban, CheckCircle2, Network, ShieldAlert } from 'lucide-react';
 import { fetchIpInvestigation } from '../lib/api';
 import { getCountryName } from '../lib/utils';
 import { Badge } from './ui/Badge';
@@ -108,12 +108,15 @@ export function IpInvestigationPanel({ ip }: IpInvestigationPanelProps) {
                             </span>
                         )}
                         {data.asNumber && (
-                            <a href={`https://bgp.he.net/AS${encodeURIComponent(data.asNumber)}`} target="_blank" rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-gray-600 dark:text-gray-300 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
-                                AS{data.asNumber}<ExternalLink size={11} />
-                            </a>
+                            <Link to={`/asn/${encodeURIComponent(data.asNumber)}`} className="text-primary-600 dark:text-primary-400 hover:underline">
+                                AS{data.asNumber}
+                            </Link>
                         )}
-                        {data.cidr24 && <span className="font-mono text-gray-400">{data.cidr24}</span>}
+                        {data.cidr24 && (
+                            <Link to={`/subnet/${encodeURIComponent(data.cidr24.replace(/\//g, '_'))}`} className="font-mono text-primary-600 dark:text-primary-400 hover:underline">
+                                {data.cidr24}
+                            </Link>
+                        )}
                         {data.rdns && (
                             <span className="inline-flex items-center gap-1 text-gray-500 dark:text-gray-400 truncate">
                                 {data.rdns}
