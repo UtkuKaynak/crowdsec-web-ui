@@ -234,6 +234,7 @@ export interface StatsAlert {
 
 export type AuditAction =
   | 'decision.add'
+  | 'decision.bulk_add'
   | 'decision.delete'
   | 'decision.bulk_delete'
   | 'alert.delete'
@@ -249,29 +250,20 @@ export interface AuditLogItem {
   detail: Record<string, unknown>;
 }
 
-export type KnownGoodKind = 'cidr' | 'asn';
-
-export interface KnownGoodEntry {
-  value: string;
-  kind: KnownGoodKind;
-  label: string;
-}
-
-export interface KnownGoodHit {
+export interface AllowlistConflict {
   decisionId: string;
   value: string;
   type: string;
   origin: string;
   scenario: string | null;
   stop_at: string;
-  matchedKind: KnownGoodKind;
+  matchedAllowlist: string;
   matchedValue: string;
-  matchedLabel: string;
 }
 
 export interface SelfProtectionResponse {
-  knownGood: KnownGoodEntry[];
-  flagged: KnownGoodHit[];
+  allowlistAvailable: boolean;
+  conflicts: AllowlistConflict[];
 }
 
 export interface AllowlistItemView {
@@ -394,10 +386,46 @@ export interface IncidentItem {
 
 export interface IncidentsResponse {
   windowHours: number;
+  minAlerts: number;
   since: string;
   lastViewedAt: string | null;
   totalAlerts: number;
   incidents: IncidentItem[];
+}
+
+export interface NetworkOverviewIp {
+  ip: string;
+  alertCount: number;
+  lastSeen: string;
+  active: boolean;
+  cn: string | null;
+  asn: string | null;
+}
+
+export interface NetworkOverviewScenario {
+  scenario: string;
+  count: number;
+  lastSeen: string;
+}
+
+export interface NetworkCountryCount {
+  cn: string;
+  count: number;
+}
+
+export interface NetworkOverviewResponse {
+  kind: 'asn' | 'subnet';
+  key: string;
+  ipCount: number;
+  alertCount: number;
+  activeBans: number;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  scenarios: NetworkOverviewScenario[];
+  ips: NetworkOverviewIp[];
+  activity: IpActivityPoint[];
+  countries: NetworkCountryCount[];
+  whois: IpWhois | null;
 }
 
 export interface StatsDecision {
@@ -408,6 +436,41 @@ export interface StatsDecision {
   stop_at?: string;
   target?: string;
   simulated?: boolean;
+}
+
+export interface RepeatOffender {
+  ip: string;
+  banCount: number;
+  firstBan: string | null;
+  lastBan: string | null;
+  active: boolean;
+  asn: string | null;
+  cn: string | null;
+}
+
+export interface RepeatOffendersResponse {
+  minBans: number;
+  offenders: RepeatOffender[];
+}
+
+export interface BlocklistOriginCount {
+  origin: string;
+  count: number;
+}
+
+export interface BlocklistOverlapResponse {
+  activeTotal: number;
+  localIps: number;
+  communityIps: number;
+  overlap: number;
+  byOrigin: BlocklistOriginCount[];
+  overlapIps: string[];
+}
+
+export interface InsightsSummary {
+  incidents24h: number;
+  allowlistConflicts: number;
+  repeatOffenders: number;
 }
 
 export type DashboardGranularity = 'day' | 'hour';
@@ -617,6 +680,14 @@ export interface UpdateTableColumnsRequest {
 
 export interface AddDecisionRequest {
   ip: string;
+  duration?: string;
+  reason?: string;
+  type?: 'ban' | 'captcha';
+  scope?: 'ip' | 'range';
+}
+
+export interface BulkAddDecisionsRequest {
+  ips: string[];
   duration?: string;
   reason?: string;
   type?: 'ban' | 'captcha';

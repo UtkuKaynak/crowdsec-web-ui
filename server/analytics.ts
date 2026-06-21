@@ -1,4 +1,5 @@
 import type { CrowdsecDatabase } from './database';
+import type { NetworkOverviewResponse } from '../shared/contracts';
 import { cidrContainsIp, getIpVersion, ipToNetworkCidr } from './utils/ip';
 
 /**
@@ -98,24 +99,39 @@ export interface IncidentsResult {
   incidents: Incident[];
 }
 
-export type KnownGoodKind = 'cidr' | 'asn';
-
-export interface KnownGoodEntry {
+export interface AllowlistMatchItem {
   value: string;
-  kind: KnownGoodKind;
-  label: string;
+  allowlist: string;
 }
 
-export interface KnownGoodHit {
+export interface AllowlistConflict {
   decisionId: string;
   value: string;
   type: string;
   origin: string;
   scenario: string | null;
   stop_at: string;
-  matchedKind: KnownGoodKind;
+  matchedAllowlist: string;
   matchedValue: string;
-  matchedLabel: string;
+}
+
+export interface RepeatOffender {
+  ip: string;
+  banCount: number;
+  firstBan: string | null;
+  lastBan: string | null;
+  active: boolean;
+  asn: string | null;
+  cn: string | null;
+}
+
+export interface BlocklistOverlap {
+  activeTotal: number;
+  localIps: number;
+  communityIps: number;
+  overlap: number;
+  byOrigin: Array<{ origin: string; count: number }>;
+  overlapIps: string[];
 }
 
 interface SqlRow {
@@ -388,9 +404,11 @@ export class Analytics {
     lastViewedAt?: string | null;
     nowMs: number;
     maxIncidents?: number;
+    minAlerts?: number;
   }): IncidentsResult {
     const baselineDays = options.baselineDays ?? 7;
     const maxIncidents = options.maxIncidents ?? 200;
+    const minAlerts = Math.max(1, options.minAlerts ?? 1);
     const lastViewedAt = options.lastViewedAt ?? null;
     const nowIso = new Date(options.nowMs).toISOString();
     const sinceIso = new Date(options.nowMs - options.windowHours * 3_600_000).toISOString();
@@ -503,24 +521,23 @@ export class Analytics {
       };
     });
 
-    incidents.sort((a, b) => b.alertCount - a.alertCount || b.ipCount - a.ipCount);
+    const filtered = incidents.filter((i) => i.alertCount >= minAlerts);
+    filtered.sort((a, b) => b.alertCount - a.alertCount || b.ipCount - a.ipCount);
 
     return {
       windowHours: options.windowHours,
       since: sinceIso,
       totalAlerts: windowRows.length,
-      incidents: incidents.slice(0, maxIncidents),
+      incidents: filtered.slice(0, maxIncidents),
     };
   }
 
   /**
-   * Active bans that intersect the operator's "known-good" list (own mgmt IPs,
-   * VPN ranges, trusted ASNs). Surfaces accidental self-bans for review.
+   * Active bans whose IP is also in a CrowdSec allowlist — a contradiction worth
+   * surfacing (e.g. a manual ban, or a ban that predates the allowlist entry).
    */
-  getKnownGoodHits(entries: KnownGoodEntry[]): KnownGoodHit[] {
-    const cidrEntries = entries.filter((e) => e.kind === 'cidr');
-    const asnEntries = entries.filter((e) => e.kind === 'asn');
-    if (cidrEntries.length === 0 && asnEntries.length === 0) {
+  getAllowlistConflicts(items: AllowlistMatchItem[]): AllowlistConflict[] {
+    if (items.length === 0) {
       return [];
     }
 
@@ -534,59 +551,265 @@ export class Analytics {
       )
       .all({ $now: nowIso }) as SqlRow[];
 
-    // Look up the ASN for each banned IP (from the alert history) in one pass.
-    const asnByIp = new Map<string, string>();
-    if (asnEntries.length > 0) {
-      const values = Array.from(new Set(decisions.map((d) => String(d.value))));
-      const chunkSize = 500;
-      for (let i = 0; i < values.length; i += chunkSize) {
-        const chunk = values.slice(i, i + chunkSize);
-        const placeholders = chunk.map(() => '?').join(',');
-        const rows = this.db
-          .query(`SELECT source_ip AS ip, MAX(as_number) AS asn FROM alerts WHERE source_ip IN (${placeholders}) GROUP BY source_ip`)
-          .all(...chunk) as SqlRow[];
-        for (const row of rows) {
-          if (row.asn != null && row.asn !== '') {
-            asnByIp.set(String(row.ip), String(row.asn));
-          }
-        }
-      }
-    }
-
-    const hits: KnownGoodHit[] = [];
+    const conflicts: AllowlistConflict[] = [];
     for (const decision of decisions) {
       const value = String(decision.value);
       const isRange = value.includes('/');
-      let match: KnownGoodEntry | null = null;
-
-      for (const entry of cidrEntries) {
-        if (value === entry.value || (!isRange && cidrContainsIp(entry.value, value))) {
-          match = entry;
-          break;
-        }
-      }
-      if (!match && asnEntries.length > 0) {
-        const asn = asnByIp.get(value);
-        if (asn) {
-          match = asnEntries.find((e) => e.value === asn) ?? null;
-        }
-      }
-
+      const match = items.find((item) =>
+        value === item.value || (item.value.includes('/') && !isRange && cidrContainsIp(item.value, value)),
+      );
       if (match) {
-        hits.push({
+        conflicts.push({
           decisionId: String(decision.id),
           value,
           type: String(decision.type ?? ''),
           origin: String(decision.origin ?? ''),
           scenario: (decision.scenario as string) ?? null,
           stop_at: String(decision.stop_at ?? ''),
-          matchedKind: match.kind,
+          matchedAllowlist: match.allowlist,
           matchedValue: match.value,
-          matchedLabel: match.label,
         });
       }
     }
-    return hits;
+    return conflicts;
+  }
+
+  /** Everything seen from an ASN: IP list, scenarios, totals, ban status. */
+  getAsnOverview(asn: string): NetworkOverviewResponse {
+    const activeBans = this.activeBanSet();
+
+    const ipRows = this.db
+      .query(
+        `SELECT source_ip AS ip, COUNT(*) AS alertCount, MAX(created_at) AS lastSeen, MAX(cn) AS cn
+         FROM alerts
+         WHERE as_number = $asn AND source_ip IS NOT NULL AND source_ip <> ''
+         GROUP BY source_ip
+         ORDER BY alertCount DESC`,
+      )
+      .all({ $asn: asn }) as SqlRow[];
+
+    const scenarioRows = this.db
+      .query(
+        `SELECT scenario, COUNT(*) AS count, MAX(created_at) AS lastSeen
+         FROM alerts
+         WHERE as_number = $asn AND scenario IS NOT NULL AND scenario <> ''
+         GROUP BY scenario
+         ORDER BY count DESC`,
+      )
+      .all({ $asn: asn }) as SqlRow[];
+
+    const agg = this.db
+      .query('SELECT COUNT(*) AS alertCount, MIN(created_at) AS firstSeen, MAX(created_at) AS lastSeen FROM alerts WHERE as_number = $asn')
+      .get({ $asn: asn }) as SqlRow | undefined;
+
+    const activityRows = this.db
+      .query('SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count FROM alerts WHERE as_number = $asn GROUP BY day ORDER BY day ASC')
+      .all({ $asn: asn }) as SqlRow[];
+
+    const countryRows = this.db
+      .query("SELECT cn, COUNT(*) AS count FROM alerts WHERE as_number = $asn AND cn IS NOT NULL AND cn <> '' GROUP BY cn ORDER BY count DESC")
+      .all({ $asn: asn }) as SqlRow[];
+
+    const ips = ipRows.map((row) => ({
+      ip: String(row.ip),
+      alertCount: Number(row.alertCount ?? 0),
+      lastSeen: String(row.lastSeen ?? ''),
+      active: activeBans.has(String(row.ip)),
+      cn: (row.cn as string) ?? null,
+      asn,
+    }));
+
+    return {
+      kind: 'asn',
+      key: `AS${asn}`,
+      ipCount: ips.length,
+      alertCount: Number(agg?.alertCount ?? 0),
+      activeBans: ips.filter((i) => i.active).length,
+      firstSeen: (agg?.firstSeen as string) ?? null,
+      lastSeen: (agg?.lastSeen as string) ?? null,
+      scenarios: scenarioRows.map((row) => ({ scenario: String(row.scenario), count: Number(row.count ?? 0), lastSeen: String(row.lastSeen ?? '') })),
+      ips,
+      activity: activityRows.map((row) => ({ day: String(row.day), count: Number(row.count ?? 0) })),
+      countries: countryRows.map((row) => ({ cn: String(row.cn), count: Number(row.count ?? 0) })),
+      whois: null,
+    };
+  }
+
+  /** Everything seen from a subnet (e.g. a /24): IP list, scenarios, totals. */
+  getSubnetOverview(cidr: string): NetworkOverviewResponse | null {
+    const [networkAddr, prefixText] = cidr.split('/');
+    const version = getIpVersion(networkAddr || '');
+    if (version === null || prefixText === undefined) {
+      return null;
+    }
+
+    // Coarse SQL prefix filter, then exact membership check in JS.
+    let like: string;
+    if (version === 4) {
+      const octets = (networkAddr || '').split('.');
+      const include = Math.min(4, Math.max(1, Math.floor(Number(prefixText) / 8)));
+      like = include >= 4 ? networkAddr : `${octets.slice(0, include).join('.')}.%`;
+    } else {
+      like = `${(networkAddr || '').split(':')[0]}:%`;
+    }
+
+    const rows = this.db
+      .query(
+        `SELECT source_ip AS ip, scenario, created_at, cn, as_number AS asn
+         FROM alerts
+         WHERE source_ip LIKE $like AND source_ip IS NOT NULL AND source_ip <> ''`,
+      )
+      .all({ $like: like }) as SqlRow[];
+
+    const activeBans = this.activeBanSet();
+    const ipMap = new Map<string, { alertCount: number; lastSeen: string; cn: string | null; asn: string | null }>();
+    const scenarioMap = new Map<string, { count: number; lastSeen: string }>();
+    const dayMap = new Map<string, number>();
+    const countryMap = new Map<string, number>();
+    let alertCount = 0;
+    let firstSeen: string | null = null;
+    let lastSeen: string | null = null;
+
+    for (const row of rows) {
+      const ip = String(row.ip);
+      if (ip !== cidr && !cidrContainsIp(cidr, ip)) {
+        continue;
+      }
+      const createdAt = String(row.created_at ?? '');
+      alertCount += 1;
+      if (!firstSeen || createdAt < firstSeen) firstSeen = createdAt;
+      if (!lastSeen || createdAt > lastSeen) lastSeen = createdAt;
+
+      const day = createdAt.slice(0, 10);
+      if (day) dayMap.set(day, (dayMap.get(day) ?? 0) + 1);
+      const cn = row.cn ? String(row.cn) : '';
+      if (cn) countryMap.set(cn, (countryMap.get(cn) ?? 0) + 1);
+
+      const ipEntry = ipMap.get(ip) ?? { alertCount: 0, lastSeen: '', cn: null, asn: null };
+      ipEntry.alertCount += 1;
+      if (createdAt > ipEntry.lastSeen) ipEntry.lastSeen = createdAt;
+      if (!ipEntry.cn && row.cn) ipEntry.cn = String(row.cn);
+      if (!ipEntry.asn && row.asn) ipEntry.asn = String(row.asn);
+      ipMap.set(ip, ipEntry);
+
+      const scenario = String(row.scenario ?? '');
+      if (scenario) {
+        const s = scenarioMap.get(scenario) ?? { count: 0, lastSeen: '' };
+        s.count += 1;
+        if (createdAt > s.lastSeen) s.lastSeen = createdAt;
+        scenarioMap.set(scenario, s);
+      }
+    }
+
+    const ips = Array.from(ipMap.entries())
+      .map(([ip, e]) => ({ ip, alertCount: e.alertCount, lastSeen: e.lastSeen, active: activeBans.has(ip), cn: e.cn, asn: e.asn }))
+      .sort((a, b) => b.alertCount - a.alertCount);
+    const scenarios = Array.from(scenarioMap.entries())
+      .map(([scenario, e]) => ({ scenario, count: e.count, lastSeen: e.lastSeen }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      kind: 'subnet',
+      key: cidr,
+      ipCount: ips.length,
+      alertCount,
+      activeBans: ips.filter((i) => i.active).length,
+      firstSeen,
+      lastSeen,
+      scenarios,
+      ips,
+      activity: Array.from(dayMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([day, count]) => ({ day, count })),
+      countries: Array.from(countryMap.entries()).sort((a, b) => b[1] - a[1]).map(([cn, count]) => ({ cn, count })),
+      whois: null,
+    };
+  }
+
+  /** IPs banned repeatedly (recidivism) — candidates for longer/permanent bans. */
+  getRepeatOffenders(minBans = 2, limit = 200): RepeatOffender[] {
+    const nowIso = new Date().toISOString();
+    const rows = this.db
+      .query(
+        `SELECT value AS ip,
+                COUNT(*) AS banCount,
+                MIN(created_at) AS firstBan,
+                MAX(created_at) AS lastBan,
+                MAX(CASE WHEN stop_at > $now THEN 1 ELSE 0 END) AS active
+         FROM decisions
+         WHERE value IS NOT NULL AND value <> '' AND id NOT LIKE 'dup_%'
+         GROUP BY value
+         HAVING COUNT(*) >= $minBans
+         ORDER BY banCount DESC, lastBan DESC
+         LIMIT $limit`,
+      )
+      .all({ $now: nowIso, $minBans: minBans, $limit: limit }) as SqlRow[];
+
+    const meta = this.lookupIpMeta(rows.map((r) => String(r.ip)));
+    return rows.map((r) => {
+      const ip = String(r.ip);
+      return {
+        ip,
+        banCount: Number(r.banCount ?? 0),
+        firstBan: (r.firstBan as string) ?? null,
+        lastBan: (r.lastBan as string) ?? null,
+        active: Number(r.active ?? 0) === 1,
+        asn: meta.get(ip)?.asn ?? null,
+        cn: meta.get(ip)?.cn ?? null,
+      };
+    });
+  }
+
+  /** Overlap between your local detections and community/CAPI blocklists. */
+  getBlocklistOverlap(): BlocklistOverlap {
+    const nowIso = new Date().toISOString();
+    const byOriginRows = this.db
+      .query('SELECT origin, COUNT(DISTINCT value) AS count FROM decisions WHERE stop_at > $now AND value IS NOT NULL GROUP BY origin ORDER BY count DESC')
+      .all({ $now: nowIso }) as SqlRow[];
+
+    const isCommunity = (origin: string) => COMMUNITY_BLOCKLIST_ORIGINS.has(origin) || origin === 'lists';
+    const community = new Set<string>();
+    const local = new Set<string>();
+    const rows = this.db
+      .query("SELECT DISTINCT value, origin FROM decisions WHERE stop_at > $now AND value IS NOT NULL AND value <> ''")
+      .all({ $now: nowIso }) as SqlRow[];
+    for (const row of rows) {
+      const value = String(row.value);
+      if (isCommunity(String(row.origin ?? ''))) community.add(value);
+      else local.add(value);
+    }
+    const overlapIps = Array.from(local).filter((v) => community.has(v));
+
+    return {
+      activeTotal: new Set([...local, ...community]).size,
+      localIps: local.size,
+      communityIps: community.size,
+      overlap: overlapIps.length,
+      byOrigin: byOriginRows.map((r) => ({ origin: String(r.origin ?? ''), count: Number(r.count ?? 0) })),
+      overlapIps: overlapIps.slice(0, 200),
+    };
+  }
+
+  /** Bulk ip -> {asn, cn} lookup from the alert history. */
+  private lookupIpMeta(ips: string[]): Map<string, { asn: string | null; cn: string | null }> {
+    const result = new Map<string, { asn: string | null; cn: string | null }>();
+    const unique = Array.from(new Set(ips));
+    const chunkSize = 500;
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const chunk = unique.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .query(`SELECT source_ip AS ip, MAX(as_number) AS asn, MAX(cn) AS cn FROM alerts WHERE source_ip IN (${placeholders}) GROUP BY source_ip`)
+        .all(...chunk) as SqlRow[];
+      for (const row of rows) {
+        result.set(String(row.ip), { asn: (row.asn as string) ?? null, cn: (row.cn as string) ?? null });
+      }
+    }
+    return result;
+  }
+
+  private activeBanSet(): Set<string> {
+    const nowIso = new Date().toISOString();
+    const rows = this.db.query('SELECT DISTINCT value FROM decisions WHERE stop_at > $now').all({ $now: nowIso }) as SqlRow[];
+    return new Set(rows.map((r) => String(r.value)));
   }
 
   private toRelatedIp(row: SqlRow): RelatedIp {

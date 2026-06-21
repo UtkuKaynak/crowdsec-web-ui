@@ -393,44 +393,39 @@ export class LapiClient {
     return response.data;
   }
 
-  async addDecision(ip: string, type: string, duration: string, reason = 'Manual decision from Web UI'): Promise<unknown> {
+  private buildManualAlert(value: string, type: string, duration: string, reason: string, scope: 'ip' | 'range'): Record<string, unknown> {
     const now = new Date().toISOString();
-    const payload = [
-      {
-        scenario: 'manual/web-ui',
-        campaign_name: 'manual/web-ui',
-        message: `Manual decision from Web UI: ${reason}`,
-        events_count: 1,
-        start_at: now,
-        stop_at: now,
-        capacity: 0,
-        leakspeed: '0',
-        simulated: false,
-        events: [],
-        scenario_hash: '',
-        scenario_version: '',
-        source: {
-          scope: 'ip',
-          value: ip,
-        },
-        decisions: [
-          {
-            type,
-            duration,
-            value: ip,
-            origin: 'cscli',
-            scenario: 'manual/web-ui',
-            scope: 'ip',
-          },
-        ],
-      },
-    ];
+    return {
+      scenario: 'manual/web-ui',
+      campaign_name: 'manual/web-ui',
+      message: `Manual decision from Web UI: ${reason}`,
+      events_count: 1,
+      start_at: now,
+      stop_at: now,
+      capacity: 0,
+      leakspeed: '0',
+      simulated: false,
+      events: [],
+      scenario_hash: '',
+      scenario_version: '',
+      source: { scope, value },
+      decisions: [
+        { type, duration, value, origin: 'cscli', scenario: 'manual/web-ui', scope },
+      ],
+    };
+  }
 
+  async addDecision(value: string, type: string, duration: string, reason = 'Manual decision from Web UI', scope: 'ip' | 'range' = 'ip'): Promise<unknown> {
     const response = await this.fetchLapi('/v1/alerts', {
       method: 'POST',
-      body: payload,
+      body: [this.buildManualAlert(value, type, duration, reason, scope)],
     });
+    return response.data;
+  }
 
+  async addDecisionsBulk(values: string[], type: string, duration: string, reason = 'Manual decision from Web UI', scope: 'ip' | 'range' = 'ip'): Promise<unknown> {
+    const payload = values.map((value) => this.buildManualAlert(value, type, duration, reason, scope));
+    const response = await this.fetchLapi('/v1/alerts', { method: 'POST', body: payload });
     return response.data;
   }
 

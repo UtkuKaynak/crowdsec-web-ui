@@ -6,8 +6,11 @@ import type {
   AllowlistCheckResponse,
   AllowlistsResponse,
   IncidentsResponse,
+  InsightsSummary,
   IpInvestigationResponse,
-  KnownGoodEntry,
+  NetworkOverviewResponse,
+  RepeatOffendersResponse,
+  BlocklistOverlapResponse,
   SelfProtectionResponse,
   BulkDeleteRequest,
   BulkDeleteResult,
@@ -200,6 +203,19 @@ export async function addDecision(data: AddDecisionRequest): Promise<unknown> {
     return res.json();
 }
 
+export async function bulkAddDecisions(
+    ips: string[],
+    opts: { duration?: string; reason?: string; type?: 'ban' | 'captcha' } = {},
+): Promise<{ count: number }> {
+    const res = await fetch(apiUrl('/api/decisions/bulk-add'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ips, ...opts }),
+    });
+    handleApiError(res, 'Failed to add decisions', 'Write Operations');
+    return res.json() as Promise<{ count: number }>;
+}
+
 export async function fetchConfig(): Promise<ConfigResponse> {
     return fetchJson<ConfigResponse>('/api/config', undefined, 'Failed to fetch config');
 }
@@ -212,9 +228,9 @@ export async function fetchIpInvestigation(ip: string): Promise<IpInvestigationR
     );
 }
 
-export async function fetchIncidents(window = '24h'): Promise<IncidentsResponse> {
+export async function fetchIncidents(window = '24h', minAlerts = 10): Promise<IncidentsResponse> {
     return fetchJson<IncidentsResponse>(
-        `/api/incidents?window=${encodeURIComponent(window)}`,
+        `/api/incidents?window=${encodeURIComponent(window)}&min_alerts=${encodeURIComponent(String(minAlerts))}`,
         undefined,
         'Failed to fetch incidents',
     );
@@ -224,16 +240,28 @@ export async function markIncidentsSeen(): Promise<{ lastViewedAt: string }> {
     return sendJson<{ lastViewedAt: string }>('/api/incidents/mark-seen', { method: 'POST' }, 'Failed to mark incidents seen');
 }
 
-export async function fetchSelfProtection(): Promise<SelfProtectionResponse> {
-    return fetchJson<SelfProtectionResponse>('/api/self-protection', undefined, 'Failed to fetch self-protection data');
+export async function fetchInsightsSummary(): Promise<InsightsSummary> {
+    return fetchJson<InsightsSummary>('/api/insights/summary', undefined, 'Failed to fetch insights summary');
 }
 
-export async function updateKnownGood(knownGood: KnownGoodEntry[]): Promise<SelfProtectionResponse> {
-    return sendJson<SelfProtectionResponse>('/api/self-protection/known-good', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ knownGood }),
-    }, 'Failed to save known-good list');
+export async function fetchRepeatOffenders(minBans = 2): Promise<RepeatOffendersResponse> {
+    return fetchJson<RepeatOffendersResponse>(`/api/insights/repeat-offenders?min=${encodeURIComponent(String(minBans))}`, undefined, 'Failed to fetch repeat offenders');
+}
+
+export async function fetchBlocklistOverlap(): Promise<BlocklistOverlapResponse> {
+    return fetchJson<BlocklistOverlapResponse>('/api/insights/blocklist-overlap', undefined, 'Failed to fetch blocklist overlap');
+}
+
+export async function fetchAsnOverview(asn: string): Promise<NetworkOverviewResponse> {
+    return fetchJson<NetworkOverviewResponse>(`/api/asn/${encodeURIComponent(asn)}`, undefined, 'Failed to fetch ASN data');
+}
+
+export async function fetchSubnetOverview(cidr: string): Promise<NetworkOverviewResponse> {
+    return fetchJson<NetworkOverviewResponse>(`/api/subnet?cidr=${encodeURIComponent(cidr)}`, undefined, 'Failed to fetch subnet data');
+}
+
+export async function fetchSelfProtection(): Promise<SelfProtectionResponse> {
+    return fetchJson<SelfProtectionResponse>('/api/self-protection', undefined, 'Failed to fetch self-protection data');
 }
 
 export async function fetchAllowlists(): Promise<AllowlistsResponse> {

@@ -27,11 +27,14 @@ import type {
   AllowlistItemView,
   AllowlistsResponse,
   AllowlistView,
+  BlocklistOverlapResponse,
   IncidentsResponse,
+  InsightsSummary,
   IpInvestigationResponse,
-  KnownGoodEntry,
   LapiStatus,
+  NetworkOverviewResponse,
   PaginatedResponse,
+  RepeatOffendersResponse,
   SelfProtectionResponse,
   SlimAlert,
   StatsAlert,
@@ -51,10 +54,10 @@ import { collectDistinctOrigins, normalizeOrigin } from '../shared/origin';
 import { compileAlertSearch, compileDecisionSearch, type SearchParseError } from '../shared/search';
 import { createRuntimeConfig, getIntervalName, parseRefreshInterval, type RuntimeConfig } from './config';
 import { CrowdsecDatabase, type AlertInsertParams, type DecisionInsertParams } from './database';
-import { Analytics } from './analytics';
+import { Analytics, type AllowlistMatchItem } from './analytics';
 import { createRdnsResolver } from './utils/rdns';
 import { createRdapResolver } from './utils/rdap';
-import { getIpVersion, isValidIpOrCidr } from './utils/ip';
+import { getIpVersion } from './utils/ip';
 import { LapiClient } from './lapi';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
@@ -812,9 +815,10 @@ export function createApp(options: CreateAppOptions = {}): AppController {
 
   app.get(`${config.basePath}/api/incidents`, ensureAuth, (context) => {
     const windowHours = parseWindowHours(context.req.query('window'));
+    const minAlerts = parseMinAlerts(context.req.query('min_alerts'));
     const lastViewedAt = database.getMeta(INCIDENTS_LAST_VIEWED_KEY)?.value ?? null;
-    const result = analytics.getIncidents({ windowHours, lastViewedAt, nowMs: Date.now() });
-    const payload: IncidentsResponse = { ...result, lastViewedAt };
+    const result = analytics.getIncidents({ windowHours, minAlerts, lastViewedAt, nowMs: Date.now() });
+    const payload: IncidentsResponse = { ...result, minAlerts, lastViewedAt };
     return context.json(payload);
   });
 
@@ -824,43 +828,70 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     return context.json({ lastViewedAt });
   });
 
-  const KNOWN_GOOD_KEY = 'self_protection_known_good';
-  const ALLOWLIST_SUGGESTED_NAME = 'crowdsec-web-ui';
-
-  function getKnownGood(): KnownGoodEntry[] {
-    const stored = database.getMeta(KNOWN_GOOD_KEY)?.value;
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          return sanitizeKnownGood(parsed);
-        }
-      } catch {
-        // fall through to seed
-      }
+  app.get(`${config.basePath}/api/asn/:asn`, ensureAuth, async (context) => {
+    const asn = String(context.req.param('asn')).trim().replace(/^AS/i, '');
+    if (!/^\d+$/.test(asn)) {
+      return context.json({ error: 'Invalid ASN' }, 400);
     }
-    const seeded = parseKnownGoodSeed(config.selfProtectionKnownGood);
-    if (seeded.length > 0) {
-      database.setMeta(KNOWN_GOOD_KEY, JSON.stringify(seeded));
-    }
-    return seeded;
-  }
-
-  app.get(`${config.basePath}/api/self-protection`, ensureAuth, (context) => {
-    const knownGood = getKnownGood();
-    const flagged = analytics.getKnownGoodHits(knownGood);
-    return context.json({ knownGood, flagged } satisfies SelfProtectionResponse);
+    const overview = analytics.getAsnOverview(asn);
+    overview.whois = await rdapResolver.lookupAutnum(asn);
+    return context.json(overview satisfies NetworkOverviewResponse);
   });
 
-  app.put(`${config.basePath}/api/self-protection/known-good`, ensureAuth, async (context) => {
-    const body = await context.req.json<{ knownGood?: unknown }>();
-    if (!Array.isArray(body.knownGood)) {
-      return context.json({ error: 'knownGood must be an array' }, 400);
+  app.get(`${config.basePath}/api/subnet`, ensureAuth, async (context) => {
+    const cidr = String(context.req.query('cidr') ?? '').trim();
+    const overview = analytics.getSubnetOverview(cidr);
+    if (!overview) {
+      return context.json({ error: 'Invalid CIDR' }, 400);
     }
-    const sanitized = sanitizeKnownGood(body.knownGood);
-    database.setMeta(KNOWN_GOOD_KEY, JSON.stringify(sanitized));
-    const flagged = analytics.getKnownGoodHits(sanitized);
-    return context.json({ knownGood: sanitized, flagged } satisfies SelfProtectionResponse);
+    overview.whois = await rdapResolver.lookup(cidr.split('/')[0]);
+    return context.json(overview satisfies NetworkOverviewResponse);
+  });
+
+  app.get(`${config.basePath}/api/insights/repeat-offenders`, ensureAuth, (context) => {
+    const minBans = Math.max(2, Number.parseInt(context.req.query('min') ?? '2', 10) || 2);
+    const offenders = analytics.getRepeatOffenders(minBans, 500);
+    return context.json({ minBans, offenders } satisfies RepeatOffendersResponse);
+  });
+
+  app.get(`${config.basePath}/api/insights/blocklist-overlap`, ensureAuth, (context) =>
+    context.json(analytics.getBlocklistOverlap() satisfies BlocklistOverlapResponse),
+  );
+
+  app.get(`${config.basePath}/api/insights/summary`, ensureAuth, async (context) => {
+    const incidents = analytics.getIncidents({ windowHours: 24, minAlerts: 10, nowMs: Date.now() });
+    const { items } = await fetchAllowlistMatchItems();
+    const conflicts = analytics.getAllowlistConflicts(items);
+    const repeat = analytics.getRepeatOffenders(2, 1000);
+    return context.json({
+      incidents24h: incidents.incidents.length,
+      allowlistConflicts: conflicts.length,
+      repeatOffenders: repeat.length,
+    } satisfies InsightsSummary);
+  });
+
+  const ALLOWLIST_SUGGESTED_NAME = 'crowdsec-web-ui';
+
+  // Flattened allowlist entries (skipping expired items) for local matching.
+  async function fetchAllowlistMatchItems(): Promise<{ available: boolean; items: AllowlistMatchItem[] }> {
+    try {
+      const allowlists = normalizeAllowlists(await lapiClient.getAllowlists());
+      const nowIso = new Date().toISOString();
+      const items = allowlists.flatMap((al) =>
+        al.items
+          .filter((it) => !it.expiration || it.expiration > nowIso)
+          .map((it) => ({ value: it.value, allowlist: al.name })),
+      );
+      return { available: true, items };
+    } catch {
+      return { available: false, items: [] };
+    }
+  }
+
+  app.get(`${config.basePath}/api/self-protection`, ensureAuth, async (context) => {
+    const { available, items } = await fetchAllowlistMatchItems();
+    const conflicts = analytics.getAllowlistConflicts(items);
+    return context.json({ allowlistAvailable: available, conflicts } satisfies SelfProtectionResponse);
   });
 
   app.get(`${config.basePath}/api/allowlists`, ensureAuth, async (context) => {
@@ -1154,6 +1185,7 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       const duration = body.duration || '4h';
       const reason = body.reason || 'manual';
       const type = body.type || 'ban';
+      const scope: 'ip' | 'range' = body.scope === 'range' ? 'range' : 'ip';
 
       if (!ip) {
         return context.json({ error: 'IP address is required' }, 400);
@@ -1172,10 +1204,10 @@ export function createApp(options: CreateAppOptions = {}): AppController {
         return context.json({ error: 'Invalid duration format. Use e.g. "4h", "30m", "1d"' }, 400);
       }
 
-      const result = await lapiClient.addDecision(ip, type, duration, reason.slice(0, 256));
+      const result = await lapiClient.addDecision(ip, type, duration, reason.slice(0, 256), scope);
       console.log('Refreshing cache after adding decision...');
       await updateCacheDelta();
-      writeAuditLog(context, 'decision.add', ip, { type, duration, reason: reason.slice(0, 256) });
+      writeAuditLog(context, 'decision.add', ip, { type, duration, scope, reason: reason.slice(0, 256) });
       void runNotificationEvaluation('manual decision add');
       return context.json({ message: 'Decision added (via Alert)', result });
     };
@@ -1184,6 +1216,44 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       return await doRequest();
     } catch (error) {
       return handleApiError(error as AnyError, context, 'adding decision', doRequest);
+    }
+  });
+
+  app.post(`${config.basePath}/api/decisions/bulk-add`, ensureAuth, async (context) => {
+    const doRequest = async () => {
+      const body = await context.req.json<{ ips?: unknown; duration?: string; reason?: string; type?: string }>();
+      const duration = body.duration || '4h';
+      const reason = (body.reason || 'manual').slice(0, 256);
+      const type = body.type || 'ban';
+
+      if (!Array.isArray(body.ips) || body.ips.length === 0) {
+        return context.json({ error: 'At least one IP is required' }, 400);
+      }
+      const ips = Array.from(new Set(body.ips.map((v) => String(v).trim()).filter(Boolean)));
+      if (ips.length > 1000) {
+        return context.json({ error: 'Too many IPs (max 1000)' }, 400);
+      }
+      if (ips.some((ip) => !isValidIpOrRange(ip))) {
+        return context.json({ error: 'One or more IPs are invalid' }, 400);
+      }
+      if (!['ban', 'captcha'].includes(type)) {
+        return context.json({ error: 'Invalid type' }, 400);
+      }
+      if (!/^\d+[smhd]$/.test(duration)) {
+        return context.json({ error: 'Invalid duration format. Use e.g. "4h", "30m", "1d"' }, 400);
+      }
+
+      const result = await lapiClient.addDecisionsBulk(ips, type, duration, reason);
+      await updateCacheDelta();
+      writeAuditLog(context, 'decision.bulk_add', null, { count: ips.length, type, duration, reason });
+      void runNotificationEvaluation('bulk decision add');
+      return context.json({ message: `Added ${ips.length} decisions`, count: ips.length, result });
+    };
+
+    try {
+      return await doRequest();
+    } catch (error) {
+      return handleApiError(error as AnyError, context, 'bulk adding decisions', doRequest);
     }
   });
 
@@ -3414,47 +3484,6 @@ function getNumericDecisionId(id: string | number): number {
   return Number.isNaN(numeric) ? Number.POSITIVE_INFINITY : numeric;
 }
 
-function sanitizeKnownGood(input: unknown[]): KnownGoodEntry[] {
-  const seen = new Set<string>();
-  const result: KnownGoodEntry[] = [];
-  for (const raw of input) {
-    if (!raw || typeof raw !== 'object') continue;
-    const entry = raw as Partial<KnownGoodEntry>;
-    const value = String(entry.value ?? '').trim();
-    const kind = entry.kind === 'asn' ? 'asn' : 'cidr';
-    if (!value) continue;
-    if (kind === 'cidr' && !isValidIpOrCidr(value)) continue;
-    if (kind === 'asn' && !/^\d+$/.test(value)) continue;
-    const dedupeKey = `${kind}:${value}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    result.push({ value, kind, label: String(entry.label ?? '').trim().slice(0, 100) });
-  }
-  return result;
-}
-
-function parseKnownGoodSeed(raw: string): KnownGoodEntry[] {
-  // Format: comma-separated "value=label", value is a CIDR/IP or "AS####".
-  const entries = raw
-    .split(',')
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .map((token) => {
-      const [valuePart, ...labelParts] = token.split('=');
-      const rawValue = valuePart.trim();
-      const label = labelParts.join('=').trim();
-      const asnMatch = rawValue.match(/^[Aa][Ss](\d+)$/);
-      if (asnMatch) {
-        return { value: asnMatch[1], kind: 'asn' as const, label };
-      }
-      if (/^\d+$/.test(rawValue)) {
-        return { value: rawValue, kind: 'asn' as const, label };
-      }
-      return { value: rawValue, kind: 'cidr' as const, label };
-    });
-  return sanitizeKnownGood(entries);
-}
-
 function normalizeAllowlists(raw: unknown): AllowlistView[] {
   const list = Array.isArray(raw) ? raw : [];
   return list.map((entry) => {
@@ -3481,6 +3510,14 @@ function isAllowlistHit(detail: unknown): boolean {
   if (Array.isArray(detail)) return detail.length > 0;
   if (typeof detail === 'object') return Object.keys(detail as object).length > 0;
   return Boolean(detail);
+}
+
+function parseMinAlerts(raw: string | undefined): number {
+  const value = Number.parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(value) || value < 1) {
+    return 10;
+  }
+  return Math.min(100000, value);
 }
 
 function parseWindowHours(raw: string | undefined): number {

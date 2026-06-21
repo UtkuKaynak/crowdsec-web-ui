@@ -56,6 +56,12 @@ export function Layout() {
         if (location.pathname.startsWith('/ip/')) {
             return t('pages.ipInvestigation.title');
         }
+        if (location.pathname.startsWith('/asn/')) {
+            return t('pages.network.asnTitle');
+        }
+        if (location.pathname.startsWith('/subnet/')) {
+            return t('pages.network.subnetTitle');
+        }
         switch (location.pathname) {
             case '/':
                 return t('pages.dashboard.title');
@@ -67,6 +73,8 @@ export function Layout() {
                 return t('pages.decisions.title');
             case '/self-protection':
                 return t('pages.selfProtection.title');
+            case '/insights':
+                return t('pages.insights.title');
             case '/notifications':
                 return t('pages.notifications.title');
             case '/audit-log':
