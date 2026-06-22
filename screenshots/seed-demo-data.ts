@@ -461,7 +461,65 @@ database.setMeta('table_column_preferences', JSON.stringify({
   },
 }));
 
+seedMetrics();
+
 database.setMeta('refresh_interval_ms', '300000');
 database.close();
+
+/**
+ * Synthesize observability metrics by replaying cumulative-counter "scrapes"
+ * through the real ingest path (so minute/hour/day rollups are produced exactly
+ * as a live scrape would). Covers the last 30 days (6h cadence) plus the last
+ * 48h at 15-min cadence for a detailed default (24h) view.
+ */
+function seedMetrics(): void {
+  const seriesDefs: Array<{ metric: string; dimension: string; basePerHour: number }> = [
+    // parser_ok — per-domain web traffic (Virtualmin per-vhost access logs).
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/punicafilms.com_access_log', basePerHour: 820 },
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/yildizege.org_access_log', basePerHour: 140 },
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/dtaki.com_access_log', basePerHour: 260 },
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/wavecreativestudio.co_access_log', basePerHour: 60 },
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/n8n.punicafilms.com_access_log', basePerHour: 95 },
+    { metric: 'parser_ok', dimension: '/var/log/virtualmin/ntfy.punicafilms.com_access_log', basePerHour: 70 },
+    // bucket_overflow — attacks by scenario.
+    { metric: 'bucket_overflow', dimension: 'crowdsecurity/http-admin-interface-probing', basePerHour: 9 },
+    { metric: 'bucket_overflow', dimension: 'crowdsecurity/http-bad-user-agent', basePerHour: 6 },
+    { metric: 'bucket_overflow', dimension: 'Guezli/postfix-sasl-bf', basePerHour: 12 },
+    { metric: 'bucket_overflow', dimension: 'crowdsecurity/ssh-bf', basePerHour: 4 },
+    { metric: 'bucket_overflow', dimension: 'crowdsecurity/CVE-2017-9841', basePerHour: 2 },
+    // parser_ko — unparsed lines (detection blind spots).
+    { metric: 'parser_ko', dimension: '/var/log/maillog', basePerHour: 180 },
+    { metric: 'parser_ko', dimension: '/var/log/secure', basePerHour: 40 },
+    { metric: 'parser_ko', dimension: '/var/log/messages', basePerHour: 210 },
+    { metric: 'parser_ko', dimension: '/var/log/audit/audit.log', basePerHour: 150 },
+  ];
+
+  // Oldest → newest list of "minutes ago": coarse over 30d, fine over the last 48h.
+  const stepsMin: number[] = [];
+  for (let m = 30 * 1440; m > 2 * 1440; m -= 360) stepsMin.push(m);
+  for (let m = 2 * 1440; m >= 0; m -= 15) stepsMin.push(m);
+
+  const counters = new Map<string, number>();
+  let previousMinutesAgo = stepsMin[0] + 15;
+
+  for (const minutesAgo of stepsMin) {
+    const gapMinutes = Math.max(1, previousMinutesAgo - minutesAgo);
+    previousMinutesAgo = minutesAgo;
+    const ts = iso(minutesAgo);
+    const hour = new Date(now.getTime() - minutesAgo * 60_000).getUTCHours();
+    // Gentle diurnal curve (~0.4 at night → ~1.0 mid-day).
+    const diurnal = 0.4 + 0.6 * ((Math.sin((hour / 24) * 2 * Math.PI - Math.PI / 2) + 1) / 2);
+
+    const samples = seriesDefs.map((def) => {
+      const key = `${def.metric}{${def.dimension}}`;
+      const increment = Math.round(def.basePerHour * (gapMinutes / 60) * diurnal * (0.6 + 0.8 * Math.random()));
+      const next = (counters.get(key) ?? 0) + increment;
+      counters.set(key, next);
+      return { seriesKey: key, metric: def.metric, dimension: def.dimension, rawValue: next };
+    });
+
+    database.ingestCounterSamples(samples, ts);
+  }
+}
 
 console.log(`Seeded screenshot database at ${dbPath}`);

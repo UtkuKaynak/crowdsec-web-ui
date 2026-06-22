@@ -725,3 +725,41 @@ export interface BulkDeleteResult {
 export interface DeleteResult {
   message: string;
 }
+
+// --- Observability metrics (CrowdSec Prometheus ingestion) ---
+
+export type MetricsResolution = 'minute' | 'hour' | 'day';
+
+export interface MetricsStatusView {
+  isConnected: boolean;
+  lastScrapeAt: string | null;
+  lastError: string | null;
+  sampleCount: number;
+}
+
+export interface MetricSeriesPoint {
+  ts: string;
+  value: number;
+}
+
+export interface MetricSeriesDimension {
+  dimension: string;
+  total: number;
+  points: MetricSeriesPoint[];
+}
+
+export interface MetricSeries {
+  metric: string;
+  dimensions: MetricSeriesDimension[];
+}
+
+export interface MetricsOverviewResponse {
+  enabled: boolean;
+  available: boolean;
+  status: MetricsStatusView | null;
+  range: string;
+  resolution: MetricsResolution;
+  start: string;
+  end: string;
+  series: MetricSeries[];
+}

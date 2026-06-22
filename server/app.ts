@@ -32,6 +32,11 @@ import type {
   InsightsSummary,
   IpInvestigationResponse,
   LapiStatus,
+  MetricsOverviewResponse,
+  MetricSeries,
+  MetricSeriesPoint,
+  MetricsResolution,
+  MetricsStatusView,
   NetworkOverviewResponse,
   PaginatedResponse,
   RepeatOffendersResponse,
@@ -59,6 +64,7 @@ import { createRdnsResolver } from './utils/rdns';
 import { createRdapResolver } from './utils/rdap';
 import { getIpVersion } from './utils/ip';
 import { LapiClient } from './lapi';
+import { MetricsClient, DEFAULT_METRIC_MAPPINGS, selectCounterSamples } from './metrics';
 import { createNotificationService } from './notifications';
 import type { MqttPublishConfig } from './notifications/mqtt-client';
 import { createNotificationOutboundGuard } from './notifications/outbound-guard';
@@ -100,6 +106,7 @@ export interface AppController {
   stopBackgroundTasks: () => void;
   getSyncStatus: () => SyncStatus;
   getLapiStatus: () => LapiStatus;
+  getMetricsStatus: () => MetricsStatusView | null;
 }
 
 interface PersistedConfig {
@@ -323,6 +330,9 @@ export function createApp(options: CreateAppOptions = {}): AppController {
     requestTimeoutMs: config.lapiRequestTimeoutMs,
     version: config.version,
   });
+  const metricsClient = config.metricsEnabled && config.metricsUrl
+    ? new MetricsClient({ metricsUrl: config.metricsUrl, requestTimeoutMs: config.metricsRequestTimeoutMs })
+    : null;
   const checkForUpdates = options.updateChecker || createUpdateChecker({
     dockerImageRef: config.dockerImageRef,
     branch: config.branch,
@@ -392,6 +402,11 @@ export function createApp(options: CreateAppOptions = {}): AppController {
   let isHeartbeatSchedulerRunning = false;
   let heartbeatPromise: Promise<void> | null = null;
   let heartbeatFailureLogged = false;
+  let metricsTimeout: ReturnType<typeof setTimeout> | null = null;
+  let isMetricsSchedulerRunning = false;
+  let metricsPromise: Promise<void> | null = null;
+  let metricsFailureLogged = false;
+  let lastMetricsPruneMs = 0;
   let bootstrapRetryTimeout: ReturnType<typeof setTimeout> | null = null;
   let bootstrapPromise: Promise<boolean> | null = null;
   let bootstrapWaitLogged = false;
@@ -869,6 +884,49 @@ export function createApp(options: CreateAppOptions = {}): AppController {
       repeatOffenders: repeat.length,
     } satisfies InsightsSummary);
   });
+
+  app.get(`${config.basePath}/api/metrics/overview`, ensureAuth, (context) => {
+    const range = context.req.query('range') ?? '24h';
+    return context.json(buildMetricsOverview(range) satisfies MetricsOverviewResponse);
+  });
+
+  function buildMetricsOverview(rangeStr: string): MetricsOverviewResponse {
+    const enabled = Boolean(metricsClient);
+    const status = metricsClient ? metricsClient.getStatus() : null;
+    const rangeMs = parseRefreshInterval(rangeStr) || 24 * 3_600_000;
+    const resolution = pickMetricsResolution(rangeMs);
+    const nowMs = Date.now();
+    const start = new Date(nowMs - rangeMs).toISOString();
+    const end = new Date(nowMs + 60_000).toISOString();
+
+    const series: MetricSeries[] = [];
+    if (enabled) {
+      for (const metric of METRIC_IDS) {
+        const totals = database
+          .getMetricDimensionTotals(metric, resolution, start, end)
+          .slice(0, MAX_METRIC_DIMENSIONS);
+        const keep = new Set(totals.map((entry) => entry.dimension));
+        const byDimension = new Map<string, MetricSeriesPoint[]>();
+        for (const row of database.getMetricRollup(metric, resolution, start, end)) {
+          if (!keep.has(row.dimension)) continue;
+          const points = byDimension.get(row.dimension) ?? [];
+          points.push({ ts: row.bucket_ts, value: row.delta });
+          byDimension.set(row.dimension, points);
+        }
+        series.push({
+          metric,
+          dimensions: totals.map((entry) => ({
+            dimension: entry.dimension,
+            total: entry.total,
+            points: byDimension.get(entry.dimension) ?? [],
+          })),
+        });
+      }
+    }
+
+    const available = enabled && series.some((entry) => entry.dimensions.length > 0);
+    return { enabled, available, status, range: rangeStr, resolution, start, end, series };
+  }
 
   const ALLOWLIST_SUGGESTED_NAME = 'crowdsec-web-ui';
 
@@ -2505,6 +2563,76 @@ ${errorSummary}  Status: ${syncSummary.state}
     }
   }
 
+  async function scrapeMetricsOnce(): Promise<void> {
+    if (!metricsClient) return;
+    if (metricsPromise) return metricsPromise;
+
+    metricsPromise = (async () => {
+      try {
+        const samples = await metricsClient.scrape();
+        const counters = selectCounterSamples(samples, DEFAULT_METRIC_MAPPINGS);
+        const now = Date.now();
+        database.ingestCounterSamples(counters, new Date(now).toISOString());
+
+        // Prune retention at most hourly.
+        if (now - lastMetricsPruneMs >= 3_600_000) {
+          database.pruneMetrics(now);
+          lastMetricsPruneMs = now;
+        }
+
+        if (metricsFailureLogged) {
+          console.log('CrowdSec metrics scrape restored.');
+        }
+        metricsFailureLogged = false;
+      } catch (error: any) {
+        if (!metricsFailureLogged) {
+          console.warn(`CrowdSec metrics scrape failed: ${error?.message || 'Unknown error'}`);
+        }
+        metricsFailureLogged = true;
+      } finally {
+        metricsPromise = null;
+      }
+    })();
+
+    return metricsPromise;
+  }
+
+  async function runMetricsLoop(): Promise<void> {
+    if (!isMetricsSchedulerRunning) return;
+
+    await scrapeMetricsOnce();
+
+    if (!isMetricsSchedulerRunning || config.metricsScrapeIntervalMs <= 0) return;
+
+    metricsTimeout = setTimeout(() => {
+      void runMetricsLoop();
+    }, config.metricsScrapeIntervalMs);
+  }
+
+  function startMetricsScheduler(): void {
+    stopMetricsScheduler(false);
+    if (!metricsClient || config.metricsScrapeIntervalMs <= 0) {
+      return;
+    }
+
+    console.log(`Starting CrowdSec metrics ingestion (${getIntervalName(config.metricsScrapeIntervalMs)})...`);
+    isMetricsSchedulerRunning = true;
+    metricsTimeout = setTimeout(() => {
+      void runMetricsLoop();
+    }, 0);
+  }
+
+  function stopMetricsScheduler(logStop = true): void {
+    if (logStop && (isMetricsSchedulerRunning || metricsTimeout)) {
+      console.log('Stopping CrowdSec metrics ingestion...');
+    }
+    isMetricsSchedulerRunning = false;
+    if (metricsTimeout) {
+      clearTimeout(metricsTimeout);
+      metricsTimeout = null;
+    }
+  }
+
   async function activityTrackerMiddleware(context: HonoContext, next: HonoNext): Promise<void> {
     const now = Date.now();
     const wasIdle = now - lastRequestTime > config.idleThresholdMs;
@@ -3157,12 +3285,16 @@ ${errorSummary}  Status: ${syncSummary.state}
     stopBackgroundTasks: () => {
       stopRefreshScheduler();
       stopHeartbeatScheduler();
+      stopMetricsScheduler();
     },
     getSyncStatus: () => ({ ...syncStatus }),
     getLapiStatus: () => lapiClient.getStatus(),
+    getMetricsStatus: () => (metricsClient ? metricsClient.getStatus() : null),
   };
 
   function startBackgroundTasks(): void {
+    // Metrics ingestion is independent of LAPI auth (separate read-only channel).
+    startMetricsScheduler();
     if (!lapiClient.hasAuthConfig()) {
       console.warn('Cache initialization skipped - CrowdSec LAPI authentication not configured');
       return;
@@ -3172,6 +3304,15 @@ ${errorSummary}  Status: ${syncSummary.state}
     void ensureBootstrapReady('startup');
   }
 
+}
+
+const METRIC_IDS: string[] = Array.from(new Set(DEFAULT_METRIC_MAPPINGS.map((mapping) => mapping.metric)));
+const MAX_METRIC_DIMENSIONS = 12;
+
+function pickMetricsResolution(rangeMs: number): MetricsResolution {
+  if (rangeMs <= 48 * 3_600_000) return 'minute';
+  if (rangeMs <= 30 * 86_400_000) return 'hour';
+  return 'day';
 }
 
 function cloneDefaultTableColumnPreferences(): TableColumnPreferences {

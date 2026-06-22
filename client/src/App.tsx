@@ -18,6 +18,7 @@ const Incidents = lazy(async () => ({ default: (await import('./pages/Incidents'
 const SelfProtection = lazy(async () => ({ default: (await import('./pages/SelfProtection')).SelfProtection }));
 const NetworkOverview = lazy(async () => ({ default: (await import('./pages/NetworkOverview')).NetworkOverview }));
 const Insights = lazy(async () => ({ default: (await import('./pages/Insights')).Insights }));
+const Metrics = lazy(async () => ({ default: (await import('./pages/Metrics')).Metrics }));
 
 function RouteFallback() {
   const { t } = useI18n();
@@ -88,6 +89,14 @@ function AppContent() {
               element={(
                 <Suspense fallback={<RouteFallback />}>
                   <Insights />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="metrics"
+              element={(
+                <Suspense fallback={<RouteFallback />}>
+                  <Metrics />
                 </Suspense>
               )}
             />

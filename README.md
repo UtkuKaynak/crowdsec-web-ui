@@ -291,6 +291,10 @@ Choose exactly one auth mode: password auth or mTLS auth.
 | `CROWDSEC_ALERT_INCLUDE_CAPI` | `false` | Add the Central API / community-blocklist alert feed. |
 | `CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY` | `false` | Keep alerts whose effective origin is empty when using explicit include filters. |
 | `CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY` | `false` | Drop alerts whose effective origin is empty. |
+| `CROWDSEC_METRICS_URL` | empty | CrowdSec Prometheus metrics endpoint (e.g. `http://127.0.0.1:6060/metrics`). Set to enable the **Metrics** page (per-source traffic, attacks by scenario, parser coverage). Leave empty to disable. The web-ui must be able to reach this URL — on a host-networked container it is the loopback endpoint, the same way it reaches LAPI. Requires `prometheus.level: full` in the CrowdSec `config.yaml`. |
+| `CROWDSEC_METRICS_ENABLED` | `true` when `CROWDSEC_METRICS_URL` is set | Force metrics ingestion on or off independently of the URL. |
+| `CROWDSEC_METRICS_INTERVAL` | `1m` | How often to scrape the metrics endpoint. Accepts `s`/`m`/`h` values. |
+| `CROWDSEC_METRICS_REQUEST_TIMEOUT` | `10s` | Timeout for each metrics scrape request. |
 | `NOTIFICATION_SECRET_KEY` | auto-generated and persisted | Optional fixed encryption key for saved notification secrets. If unset, the app generates one and stores it in app metadata. |
 | `NOTIFICATION_SECRET_KEY_FILE` | auto-generated and persisted | Optional Docker Secrets alternative: read `NOTIFICATION_SECRET_KEY` from a file. Do not set both variables. |
 | `NOTIFICATION_ALLOW_PRIVATE_ADDRESSES` | `true` | Allow notification destinations on private, loopback, and link-local addresses. Set to `false` to block them. |
@@ -805,6 +809,12 @@ The Web UI maintains its own local history of alerts and decisions. Data fetched
     CROWDSEC_ALERT_SYNC_MIN_CHUNK=15m
     CROWDSEC_BOOTSTRAP_RETRY_DELAY=30s
     CROWDSEC_BOOTSTRAP_RETRY_ENABLED=true
+    # Optional: enable the Metrics page (per-source traffic, attacks, parser
+    # coverage). Point at the CrowdSec Prometheus endpoint; the web-ui must be
+    # able to reach it (on a host-networked container this is the loopback URL).
+    # Requires `prometheus.level: full` in the CrowdSec config.yaml.
+    # CROWDSEC_METRICS_URL=http://127.0.0.1:6060/metrics
+    # CROWDSEC_METRICS_INTERVAL=1m
     # Optional: Base path for reverse proxy deployments
     # BASE_PATH=/crowdsec
     ```

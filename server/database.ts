@@ -2,6 +2,25 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
 import BetterSqlite3 from 'better-sqlite3';
+import { computeCounterDelta, type MetricCounterSample } from './metrics';
+
+export type { MetricCounterSample };
+
+export type MetricsResolution = 'minute' | 'hour' | 'day';
+
+export interface MetricRollupRow {
+  dimension: string;
+  bucket_ts: string;
+  delta: number;
+}
+
+/** RRD-style retention: keep fine resolution briefly, coarse resolution long. */
+export const METRICS_RESOLUTIONS: MetricsResolution[] = ['minute', 'hour', 'day'];
+export const METRICS_RETENTION_MS: Record<MetricsResolution, number> = {
+  minute: 2 * 86_400_000, // 2 days
+  hour: 30 * 86_400_000, // 30 days
+  day: 730 * 86_400_000, // ~2 years
+};
 
 type SqliteStatement = {
   run: (...params: any[]) => { changes: number };
@@ -156,6 +175,10 @@ export class CrowdsecDatabase {
   private readonly insertAuditLogStatement: any;
   private readonly listAuditLogPageStatement: any;
   private readonly countAuditLogStatement: any;
+  private readonly metricsGetSeriesStatement: any;
+  private readonly metricsUpsertSeriesStatement: any;
+  private readonly metricsUpsertRollupStatement: any;
+  private readonly metricsPruneRollupStatement: any;
 
   constructor(options: DatabaseOptions = {}) {
     const resolvedPath = resolveDatabasePath(options);
@@ -335,6 +358,18 @@ export class CrowdsecDatabase {
       LIMIT $limit OFFSET $offset
     `);
     this.countAuditLogStatement = this.db.query('SELECT COUNT(*) as count FROM audit_log');
+    this.metricsGetSeriesStatement = this.db.query('SELECT last_value FROM metrics_series WHERE series_key = $series_key');
+    this.metricsUpsertSeriesStatement = this.db.query(`
+      INSERT INTO metrics_series (series_key, metric, dimension, last_value, last_seen_at)
+      VALUES ($series_key, $metric, $dimension, $last_value, $last_seen_at)
+      ON CONFLICT(series_key) DO UPDATE SET last_value = excluded.last_value, last_seen_at = excluded.last_seen_at
+    `);
+    this.metricsUpsertRollupStatement = this.db.query(`
+      INSERT INTO metrics_rollup (metric, dimension, resolution, bucket_ts, delta)
+      VALUES ($metric, $dimension, $resolution, $bucket_ts, $delta)
+      ON CONFLICT(metric, dimension, resolution, bucket_ts) DO UPDATE SET delta = delta + excluded.delta
+    `);
+    this.metricsPruneRollupStatement = this.db.query('DELETE FROM metrics_rollup WHERE resolution = $resolution AND bucket_ts < $cutoff');
   }
 
   close(): void {
@@ -699,9 +734,84 @@ export class CrowdsecDatabase {
     return (this.countAuditLogStatement.get() as CountRow).count;
   }
 
+  /**
+   * Ingest a scrape of raw counter samples: compute the reset-aware delta per
+   * series against the stored baseline, persist the new baseline, and add the
+   * delta into the minute/hour/day rollup buckets. Idempotent within a bucket
+   * (deltas accumulate). Runs in a single transaction.
+   */
+  ingestCounterSamples(samples: MetricCounterSample[], nowIso: string): void {
+    if (samples.length === 0) return;
+
+    const ingest = this.db.transaction((rows: MetricCounterSample[]) => {
+      for (const row of rows) {
+        const existing = this.metricsGetSeriesStatement.get({ $series_key: row.seriesKey }) as { last_value: number } | undefined;
+        const delta = computeCounterDelta(existing?.last_value, row.rawValue);
+
+        this.metricsUpsertSeriesStatement.run({
+          $series_key: row.seriesKey,
+          $metric: row.metric,
+          $dimension: row.dimension,
+          $last_value: row.rawValue,
+          $last_seen_at: nowIso,
+        });
+
+        if (delta <= 0) continue;
+
+        for (const resolution of METRICS_RESOLUTIONS) {
+          this.metricsUpsertRollupStatement.run({
+            $metric: row.metric,
+            $dimension: row.dimension,
+            $resolution: resolution,
+            $bucket_ts: truncateBucket(nowIso, resolution),
+            $delta: delta,
+          });
+        }
+      }
+    });
+
+    ingest(samples);
+  }
+
+  getMetricRollup(metric: string, resolution: MetricsResolution, startIso: string, endIso: string): MetricRollupRow[] {
+    return this.db.query(`
+      SELECT dimension, bucket_ts, delta FROM metrics_rollup
+      WHERE metric = $metric AND resolution = $resolution AND bucket_ts >= $start AND bucket_ts < $end
+      ORDER BY bucket_ts ASC
+    `).all({ $metric: metric, $resolution: resolution, $start: startIso, $end: endIso }) as MetricRollupRow[];
+  }
+
+  /** Top dimensions for a metric over a window, ranked by total delta. */
+  getMetricDimensionTotals(metric: string, resolution: MetricsResolution, startIso: string, endIso: string): Array<{ dimension: string; total: number }> {
+    return this.db.query(`
+      SELECT dimension, SUM(delta) AS total FROM metrics_rollup
+      WHERE metric = $metric AND resolution = $resolution AND bucket_ts >= $start AND bucket_ts < $end
+      GROUP BY dimension
+      ORDER BY total DESC
+    `).all({ $metric: metric, $resolution: resolution, $start: startIso, $end: endIso }) as Array<{ dimension: string; total: number }>;
+  }
+
+  pruneMetrics(nowMs: number): void {
+    for (const resolution of METRICS_RESOLUTIONS) {
+      const cutoff = new Date(nowMs - METRICS_RETENTION_MS[resolution]).toISOString();
+      this.metricsPruneRollupStatement.run({ $resolution: resolution, $cutoff: cutoff });
+    }
+  }
+
   transaction<T>(callback: (value: T) => void): (value: T) => void {
     return this.db.transaction(callback);
   }
+}
+
+/** Truncate an ISO timestamp to the start of its minute / hour / day bucket (UTC). */
+export function truncateBucket(iso: string, resolution: MetricsResolution): string {
+  const date = new Date(iso);
+  const y = date.getUTCFullYear();
+  const mo = date.getUTCMonth();
+  const d = date.getUTCDate();
+  const h = resolution === 'day' ? 0 : date.getUTCHours();
+  const mi = resolution === 'minute' ? date.getUTCMinutes() : 0;
+  return new Date(Date.UTC(y, mo, d, h, mi, 0, 0)).toISOString();
 }
 
 function runChunkedIdMutation(db: Database, statementPrefix: string, ids: string[], leadingParams: unknown[] = []): number {
@@ -917,8 +1027,28 @@ function initSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
   `;
 
+  const createMetricsTables = `
+    CREATE TABLE IF NOT EXISTS metrics_series (
+      series_key TEXT PRIMARY KEY,
+      metric TEXT NOT NULL,
+      dimension TEXT NOT NULL,
+      last_value REAL NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS metrics_rollup (
+      metric TEXT NOT NULL,
+      dimension TEXT NOT NULL,
+      resolution TEXT NOT NULL,
+      bucket_ts TEXT NOT NULL,
+      delta REAL NOT NULL,
+      PRIMARY KEY (metric, dimension, resolution, bucket_ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_metrics_rollup_query ON metrics_rollup(metric, resolution, bucket_ts);
+  `;
+
   db.exec(createAlertsTable);
   migrateAlertsEnrichmentColumns(db);
+  db.exec(createMetricsTables);
   db.exec(createMetaTable);
   db.exec(createNotificationChannelsTable);
   db.exec(createNotificationRulesTable);

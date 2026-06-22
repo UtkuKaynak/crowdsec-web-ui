@@ -44,6 +44,10 @@ export interface RuntimeConfig {
   notificationDebugPayloads: boolean;
   auditUserHeaders: string[];
   ipRdapEnabled: boolean;
+  metricsEnabled: boolean;
+  metricsUrl: string;
+  metricsScrapeIntervalMs: number;
+  metricsRequestTimeoutMs: number;
 }
 
 export function parseRefreshInterval(intervalStr: string | undefined | null): number {
@@ -260,6 +264,26 @@ export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runti
     notificationDebugPayloads: parseBooleanEnv(env.NOTIFICATION_DEBUG_PAYLOADS, false),
     auditUserHeaders: parseAuditUserHeaders(env.AUDIT_USER_HEADER),
     ipRdapEnabled: parseBooleanEnv(env.IP_RDAP_ENABLED, true),
+    ...createMetricsConfig(env),
+  };
+}
+
+/**
+ * CrowdSec Prometheus metrics endpoint config (optional, opt-in). Powers the
+ * observability dashboards. Disabled unless CROWDSEC_METRICS_URL is set (or
+ * CROWDSEC_METRICS_ENABLED is forced on). On the reference host-networked deploy
+ * the endpoint is loopback: `http://127.0.0.1:6060/metrics`.
+ */
+function createMetricsConfig(env: NodeJS.ProcessEnv): Pick<
+  RuntimeConfig,
+  'metricsEnabled' | 'metricsUrl' | 'metricsScrapeIntervalMs' | 'metricsRequestTimeoutMs'
+> {
+  const metricsUrl = (env.CROWDSEC_METRICS_URL || '').trim();
+  return {
+    metricsEnabled: parseBooleanEnv(env.CROWDSEC_METRICS_ENABLED, metricsUrl.length > 0),
+    metricsUrl,
+    metricsScrapeIntervalMs: parsePositiveIntervalEnv(env.CROWDSEC_METRICS_INTERVAL, '1m'),
+    metricsRequestTimeoutMs: parsePositiveIntervalEnv(env.CROWDSEC_METRICS_REQUEST_TIMEOUT, '10s'),
   };
 }
 

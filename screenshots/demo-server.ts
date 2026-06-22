@@ -18,6 +18,9 @@ const config = createRuntimeConfig({
   CROWDSEC_HEARTBEAT_INTERVAL: '0',
   CROWDSEC_BOOTSTRAP_RETRY_ENABLED: 'false',
   CROWDSEC_SIMULATIONS_ENABLED: 'true',
+  // Enables the Metrics page to render the seeded rollups. No live scraping
+  // happens here (startBackgroundTasks is false), so the URL is never fetched.
+  CROWDSEC_METRICS_URL: process.env.CROWDSEC_METRICS_URL || 'http://127.0.0.1:6060/metrics',
   VITE_VERSION: process.env.VITE_VERSION || '2026.06.05',
   VITE_BRANCH: process.env.VITE_BRANCH || 'main',
   VITE_COMMIT_HASH: process.env.VITE_COMMIT_HASH || 'screenshot',
