@@ -7,6 +7,7 @@ import type {
   AllowlistsResponse,
   IncidentsResponse,
   InsightsSummary,
+  MetricsOverviewResponse,
   IpInvestigationResponse,
   NetworkOverviewResponse,
   RepeatOffendersResponse,
@@ -258,6 +259,14 @@ export async function fetchAsnOverview(asn: string): Promise<NetworkOverviewResp
 
 export async function fetchSubnetOverview(cidr: string): Promise<NetworkOverviewResponse> {
     return fetchJson<NetworkOverviewResponse>(`/api/subnet?cidr=${encodeURIComponent(cidr)}`, undefined, 'Failed to fetch subnet data');
+}
+
+export async function fetchMetricsOverview(range = '24h'): Promise<MetricsOverviewResponse> {
+    return fetchJson<MetricsOverviewResponse>(
+        `/api/metrics/overview?range=${encodeURIComponent(range)}`,
+        undefined,
+        'Failed to fetch metrics',
+    );
 }
 
 export async function fetchSelfProtection(): Promise<SelfProtectionResponse> {

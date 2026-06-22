@@ -607,4 +607,35 @@ describe('CrowdsecDatabase', () => {
 
     db.close();
   });
+
+  test('ingests counter samples as reset-aware deltas into rollups', () => {
+    const db = createTestDatabase();
+    const sample = (raw: number) => ([{ seriesKey: 'parser_ok{source=/a}', metric: 'parser_ok', dimension: '/a', rawValue: raw }]);
+
+    // First scrape: baseline only, no delta recorded.
+    db.ingestCounterSamples(sample(100), '2026-06-22T10:00:30.000Z');
+    expect(db.getMetricRollup('parser_ok', 'minute', '2026-06-22T00:00:00.000Z', '2026-06-23T00:00:00.000Z')).toHaveLength(0);
+
+    // Second scrape in the same minute: +50.
+    db.ingestCounterSamples(sample(150), '2026-06-22T10:00:55.000Z');
+    // Third scrape, next minute: +30.
+    db.ingestCounterSamples(sample(180), '2026-06-22T10:01:10.000Z');
+
+    const minute = db.getMetricRollup('parser_ok', 'minute', '2026-06-22T00:00:00.000Z', '2026-06-23T00:00:00.000Z');
+    expect(minute).toEqual([
+      { dimension: '/a', bucket_ts: '2026-06-22T10:00:00.000Z', delta: 50 },
+      { dimension: '/a', bucket_ts: '2026-06-22T10:01:00.000Z', delta: 30 },
+    ]);
+
+    // Hour rollup aggregates both minutes into one bucket.
+    const hour = db.getMetricRollup('parser_ok', 'hour', '2026-06-22T00:00:00.000Z', '2026-06-23T00:00:00.000Z');
+    expect(hour).toEqual([{ dimension: '/a', bucket_ts: '2026-06-22T10:00:00.000Z', delta: 80 }]);
+
+    // Counter reset: value drops; the increase since reset is the new value.
+    db.ingestCounterSamples(sample(5), '2026-06-22T10:02:00.000Z');
+    const totals = db.getMetricDimensionTotals('parser_ok', 'minute', '2026-06-22T00:00:00.000Z', '2026-06-23T00:00:00.000Z');
+    expect(totals).toEqual([{ dimension: '/a', total: 85 }]); // 50 + 30 + 5
+
+    db.close();
+  });
 });
