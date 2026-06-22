@@ -15,9 +15,9 @@ import { useRefresh } from '../contexts/useRefresh';
 import { useI18n } from '../lib/i18n';
 import type { MetricsOverviewResponse, MetricSeries, MetricsResolution } from '../types';
 
-type RangeOption = '24h' | '7d' | '30d';
+type RangeOption = '24h' | '7d' | '30d' | '90d' | '365d' | '730d';
 
-const RANGE_OPTIONS: RangeOption[] = ['24h', '7d', '30d'];
+const RANGE_OPTIONS: RangeOption[] = ['24h', '7d', '30d', '90d', '365d', '730d'];
 const MAX_CHART_LINES = 6;
 const SERIES_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6'];
 
@@ -54,7 +54,7 @@ function formatBucket(ts: string, resolution: MetricsResolution): string {
     if (resolution === 'hour') {
         return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit' });
     }
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString(undefined, { year: '2-digit', month: 'short', day: 'numeric' });
 }
 
 interface ChartRow {
