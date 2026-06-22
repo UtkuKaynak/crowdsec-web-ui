@@ -1,0 +1,17 @@
+# EXPERIMENTAL — validate with `crowdsec -t` before use.
+# SMTP/IMAP authentication-failure burst from a single source IP.
+# Note: if you already run a SASL brute-force collection (e.g. Guezli/postfix-sasl-bf),
+# this overlaps — keep whichever fits. Requires the postfix parser to set
+# evt.Meta.source_ip.
+type: leaky
+name: custom/smtp-auth-burst
+description: "Detect SMTP/IMAP authentication-failure bursts from one IP"
+filter: "evt.Parsed.message contains 'authentication failed' || (evt.Parsed.program == 'dovecot' && evt.Parsed.message contains 'auth failed')"
+groupby: "evt.Meta.source_ip"
+capacity: 10
+leakspeed: "1m"
+blackhole: 5m
+labels:
+  service: smtp
+  type: bruteforce
+  remediation: true

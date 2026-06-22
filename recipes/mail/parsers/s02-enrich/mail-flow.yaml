@@ -1,0 +1,49 @@
+# mail-flow.yaml — EXPERIMENTAL mail-flow classifier for the Web UI "Mail" page.
+#
+# Classifies Postfix/Dovecot events into named nodes `mail/<category>`. CrowdSec
+# exposes a per-node counter `cs_node_hits_ok_total{name="mail/..."}` for each,
+# which the Web UI scrapes and turns into the mail-flow volume chart.
+#
+# NODE-NAME CONTRACT (the Web UI keys off these exact names):
+#   mail/received  mail/sent     mail/rejected  mail/bounced
+#   mail/deferred  mail/spam     mail/auth-fail
+# (mailgraph-style: "received" = messages queued, "sent" = delivered. General
+#  per-category totals — no inbound/outbound split.)
+#
+# ⚠️  EXPERIMENTAL — validate on YOUR engine before relying on it:
+#   sudo cp -r recipes/mail/parsers/* /etc/crowdsec/parsers/
+#   sudo crowdsec -t                              # config test
+#   sudo cscli explain --file /var/log/maillog --type syslog | less   # see node hits
+#   sudo systemctl reload crowdsec
+# Field assumptions: the standard syslog parser sets evt.Parsed.program and
+# evt.Parsed.message. Adjust the filters if your setup differs (e.g. journald).
+#
+name: custom/mail-flow
+description: "Classify Postfix/Dovecot mail events into mail/<category> nodes"
+filter: "evt.Parsed.program != '' && (evt.Parsed.program startsWith 'postfix/' || evt.Parsed.program == 'dovecot')"
+nodes:
+  - name: mail/rejected
+    filter: "evt.Parsed.program endsWith '/smtpd' && evt.Parsed.message contains 'NOQUEUE: reject'"
+  - name: mail/auth-fail
+    filter: "evt.Parsed.message contains 'authentication failed' || (evt.Parsed.program == 'dovecot' && evt.Parsed.message contains 'auth failed')"
+  - name: mail/spam
+    filter: "evt.Parsed.program endsWith '/smtpd' && (evt.Parsed.message contains 'lost connection after' || evt.Parsed.message contains 'non-SMTP command')"
+  # mailgraph "received" = a message entered the queue (one cleanup message-id per message).
+  - name: mail/received
+    filter: "evt.Parsed.program endsWith '/cleanup' && evt.Parsed.message contains 'message-id='"
+  # mailgraph "sent" = a message was delivered (to a local mailbox or a remote MX).
+  - name: mail/sent
+    filter: "evt.Parsed.message contains 'status=sent'"
+  - name: mail/bounced
+    filter: "evt.Parsed.message contains 'status=bounced'"
+  - name: mail/deferred
+    filter: "evt.Parsed.message contains 'status=deferred'"
+
+  # --- recipient capture (for the dictionary-attack scenario) ----------------
+  # Not a mail/* node, so it is NOT ingested as volume — it only enriches meta.
+  - grok:
+      pattern: 'to=<%{DATA:mail_rcpt}>'
+      apply_on: message
+    statics:
+      - meta: mail_rcpt
+        expression: evt.Parsed.mail_rcpt

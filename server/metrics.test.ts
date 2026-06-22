@@ -117,6 +117,20 @@ describe('selectCounterSamples', () => {
       { seriesKey: sampleKey(samples[2]), metric: 'bucket_overflow', dimension: 'crowdsecurity/http-bf', rawValue: 12 },
     ]);
   });
+
+  test('mail_flow ingests only prefixed node-hit names (drops generic parser nodes)', () => {
+    const samples = parsePrometheusText([
+      'cs_node_hits_ok_total{name="mail/inbound-delivered",stage="s02-enrich"} 500',
+      'cs_node_hits_ok_total{name="mail/outbound-bounced",stage="s02-enrich"} 18',
+      'cs_node_hits_ok_total{name="child-crowdsecurity/apache2-logs",stage="s01-parse"} 9000',
+    ].join('\n'));
+
+    const counters = selectCounterSamples(samples, DEFAULT_METRIC_MAPPINGS);
+    expect(counters).toEqual([
+      { seriesKey: sampleKey(samples[0]), metric: 'mail_flow', dimension: 'mail/inbound-delivered', rawValue: 500 },
+      { seriesKey: sampleKey(samples[1]), metric: 'mail_flow', dimension: 'mail/outbound-bounced', rawValue: 18 },
+    ]);
+  });
 });
 
 describe('MetricsClient', () => {

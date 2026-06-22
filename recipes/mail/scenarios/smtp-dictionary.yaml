@@ -1,0 +1,17 @@
+# EXPERIMENTAL — validate with `crowdsec -t` before use.
+# Dictionary / recipient-harvesting attack: one source IP probing many DISTINCT
+# recipients. Relies on evt.Meta.mail_rcpt set by the mail-flow parser's
+# recipient-capture node (see parsers/s02-enrich/mail-flow.yaml).
+type: leaky
+name: custom/smtp-dictionary
+description: "Detect a single IP probing many distinct recipients (dictionary/RCPT harvesting)"
+filter: "evt.Parsed.program endsWith '/smtpd' && evt.Meta.mail_rcpt != ''"
+distinct: "evt.Meta.mail_rcpt"
+groupby: "evt.Meta.source_ip"
+capacity: 15
+leakspeed: "2m"
+blackhole: 10m
+labels:
+  service: smtp
+  type: scan
+  remediation: true

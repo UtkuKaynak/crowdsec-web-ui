@@ -30,17 +30,25 @@ export interface MetricMapping {
   prom: string;
   metric: string;
   label: string;
+  /** Only ingest samples whose dimension value starts with this prefix. */
+  prefix?: string;
 }
 
 /**
  * The CrowdSec counters the observability dashboards ingest. Kept deliberately
  * small — per-source throughput, per-source parser failures, per-scenario
  * overflows. Adding a panel = adding a mapping here.
+ *
+ * `mail_flow` reads per-node hit counters, scoped to the mail-flow classifier
+ * parser whose nodes are named `mail/<direction>-<category>` (e.g.
+ * `mail/inbound-delivered`). The prefix filter keeps the (otherwise very
+ * high-cardinality) node-hit metric to just those nodes.
  */
 export const DEFAULT_METRIC_MAPPINGS: MetricMapping[] = [
   { prom: 'cs_parser_hits_ok_total', metric: 'parser_ok', label: 'source' },
   { prom: 'cs_parser_hits_ko_total', metric: 'parser_ko', label: 'source' },
   { prom: 'cs_bucket_overflowed_total', metric: 'bucket_overflow', label: 'name' },
+  { prom: 'cs_node_hits_ok_total', metric: 'mail_flow', label: 'name', prefix: 'mail/' },
 ];
 
 /**
@@ -60,6 +68,7 @@ export function selectCounterSamples(samples: MetricSample[], mappings: MetricMa
     if (!mapping) continue;
     const dimension = sample.labels[mapping.label];
     if (!dimension) continue;
+    if (mapping.prefix && !dimension.startsWith(mapping.prefix)) continue;
     if (!Number.isFinite(sample.value)) continue;
     result.push({
       seriesKey: sampleKey(sample),
