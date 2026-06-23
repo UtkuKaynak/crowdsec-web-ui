@@ -24,15 +24,14 @@ const MAIL_SCENARIO_RE = /postfix|dovecot|smtp|sasl|mail|imap|exim/i;
 const CATEGORY_COLORS: Record<string, string> = {
     received: '#3b82f6',
     sent: '#10b981',
-    delivered: '#10b981',
     rejected: '#ef4444',
     bounced: '#f59e0b',
     deferred: '#eab308',
     spam: '#a855f7',
-    'auth-fail': '#ec4899',
+    virus: '#7c3aed',
 };
 // Headline categories first (mailgraph order), then the rest.
-const CATEGORY_ORDER = ['received', 'sent', 'rejected', 'bounced', 'deferred', 'spam', 'auth-fail'];
+const CATEGORY_ORDER = ['received', 'sent', 'rejected', 'bounced', 'deferred', 'spam', 'virus'];
 const FALLBACK_COLORS = ['#6366f1', '#3b82f6', '#14b8a6', '#8b5cf6', '#f97316'];
 const prettyCategory = (category: string) => category.charAt(0).toUpperCase() + category.slice(1).replace(/-/g, ' ');
 const orderCategories = (categories: string[]) =>

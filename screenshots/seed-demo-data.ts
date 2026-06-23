@@ -488,12 +488,10 @@ function seedMetrics(): void {
     { metric: 'bucket_overflow', dimension: 'crowdsecurity/ssh-bf', basePerHour: 4 },
     { metric: 'bucket_overflow', dimension: 'crowdsecurity/CVE-2017-9841', basePerHour: 2 },
     { metric: 'bucket_overflow', dimension: 'crowdsecurity/dovecot-spam', basePerHour: 3 },
-    // mail_flow — mail-flow classifier parser named nodes (mail/<category>).
+    // mail_flow — mail-flow classifier (message accounting, mailgraph-style).
     { metric: 'mail_flow', dimension: 'mail/received', basePerHour: 360 },
     { metric: 'mail_flow', dimension: 'mail/sent', basePerHour: 320 },
     { metric: 'mail_flow', dimension: 'mail/rejected', basePerHour: 55 },
-    { metric: 'mail_flow', dimension: 'mail/spam', basePerHour: 30 },
-    { metric: 'mail_flow', dimension: 'mail/auth-fail', basePerHour: 18 },
     { metric: 'mail_flow', dimension: 'mail/bounced', basePerHour: 12 },
     { metric: 'mail_flow', dimension: 'mail/deferred', basePerHour: 7 },
     // parser_ko — unparsed lines (detection blind spots).

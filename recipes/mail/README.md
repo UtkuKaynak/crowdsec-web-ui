@@ -18,18 +18,30 @@ Web UI then reads the results it produces (no companion required).
 | `scenarios/smtp-auth-burst.yaml` | SMTP/IMAP auth-failure burst from one IP. |
 | `scenarios/smtp-dictionary.yaml` | One IP probing many distinct recipients (dictionary / RCPT harvesting). |
 
-### Mail-flow categories (mailgraph-style)
+### Mail-flow categories (mailgraph-style message accounting)
 
-The parser emits these named nodes — the Web UI keys off these exact names:
+The parser counts **messages**, not connections, from the same log lines
+mailgraph uses. It emits these named nodes — the Web UI keys off these names:
 
 ```
-mail/received   mail/sent      mail/rejected   mail/bounced
-mail/deferred   mail/spam      mail/auth-fail
+mail/received   mail/sent   mail/rejected   mail/bounced   mail/deferred
 ```
 
-`received` = messages that entered the Postfix queue (one `cleanup … message-id=`
-per message); `sent` = delivered (`status=sent`). These are the two mailgraph
-headline numbers; the rest are extra context.
+| Node | Source line | Meaning |
+| --- | --- | --- |
+| `mail/received` | `postfix/qmgr … from=<…>, nrcpt=…` | message queued |
+| `mail/sent` | delivery agent `status=sent` | delivered (per recipient) |
+| `mail/bounced` | `status=bounced` | hard delivery failure |
+| `mail/deferred` | `status=deferred` | temporary delivery failure |
+| `mail/rejected` | `postfix/smtpd\|cleanup … reject:` | message refused |
+
+Optional `mail/spam` / `mail/virus` (amavis content scanning) are commented out
+in the parser — enable them if you run amavis/SpamAssassin.
+
+**Not here on purpose:** SASL auth bursts, spam-bot connections, and dictionary
+attacks are *connection/attack* signals, not message accounting — they show up in
+the Mail page's **attacks by scenario** panel (and the scenarios below), so the
+mail-flow chart stays a clean mailgraph-style message count.
 
 ## Install
 

@@ -612,7 +612,7 @@
   "pages.mail.attacksHelp": "SMTP/IMAP scenario overflows over time (brute-force, spam, auth bursts).",
   "pages.mail.noAttacks": "No mail-related scenario activity in this range.",
   "pages.mail.flowTitle": "Mail flow by category",
-  "pages.mail.flowHelp": "Message volume per category over time — received and sent (mailgraph-style), plus rejected, bounced, deferred, spam, auth-fail.",
+  "pages.mail.flowHelp": "Message accounting over time (mailgraph-style) — received, sent, rejected, bounced, deferred. Connection-based attacks (auth bursts, spam bots) are in the attacks panel above, not here.",
   "pages.mail.volumeEmpty": "No mail-flow data yet. Install the mail-flow classifier parser (see recipes/mail) to populate delivered / rejected / bounced volume.",
   "pages.insights.title": "Insights",
   "pages.insights.description": "Recidivism and blocklist-overlap analytics derived from your local history.",

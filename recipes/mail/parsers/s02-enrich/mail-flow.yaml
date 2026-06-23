@@ -1,52 +1,41 @@
 # mail-flow.yaml — EXPERIMENTAL mail-flow classifier for the Web UI "Mail" page.
 #
-# Classifies Postfix/Dovecot events into named nodes `mail/<category>`. CrowdSec
-# exposes a per-node counter `cs_node_hits_ok_total{name="mail/..."}` for each,
-# which the Web UI scrapes and turns into the mail-flow volume chart.
+# MESSAGE ACCOUNTING (mailgraph-style) — counts MAILS, not connections.
+# Connection/attack behaviour (SASL bursts, spam bots, dictionary attacks) is
+# NOT here — that is the "Mail attacks by scenario" panel + your scenarios.
 #
-# NODE-NAME CONTRACT (the Web UI keys off these exact names):
-#   mail/received  mail/sent     mail/rejected  mail/bounced
-#   mail/deferred  mail/spam     mail/auth-fail
-# (mailgraph-style: "received" = messages queued, "sent" = delivered. General
-#  per-category totals — no inbound/outbound split.)
+# Classifies Postfix events into named nodes `mail/<category>`. CrowdSec exposes
+# a per-node counter `cs_node_hits_ok_total{name="mail/..."}` for each, which the
+# Web UI scrapes into the mail-flow volume chart.
 #
-# Each node sets evt.Meta.mail_category via `statics` — a node needs a body
-# (statics/grok/nodes), a filter alone is "empty" and CrowdSec rejects it.
+# NODE-NAME CONTRACT (the Web UI keys off these exact names) — same source lines
+# mailgraph uses:
+#   mail/received   <- postfix/qmgr  "<qid>: from=<...>, size=..., nrcpt=..."  (queued message)
+#   mail/sent       <- delivery agent "status=sent"      (delivered, per recipient)
+#   mail/bounced    <- delivery agent "status=bounced"
+#   mail/deferred   <- delivery agent "status=deferred"
+#   mail/rejected   <- postfix/smtpd|cleanup "reject: "  (refused message)
 #
-# ⚠️  EXPERIMENTAL — validate on YOUR engine before relying on it:
+# Each node sets evt.Meta.mail_category via `statics` — a filter-only node is
+# "empty" and CrowdSec rejects it.
+#
+# ⚠️  EXPERIMENTAL — validate before relying on it:
 #   sudo cp -r recipes/mail/parsers/* /etc/crowdsec/parsers/
-#   sudo crowdsec -t                              # config test
-#   sudo cscli explain --file /var/log/maillog --type syslog | less   # see node hits
-#   sudo systemctl reload crowdsec
-# Field assumptions: the standard syslog parser sets evt.Parsed.program and
-# evt.Parsed.message. Adjust the filters if your setup differs (e.g. journald).
+#   sudo crowdsec -t && sudo systemctl reload crowdsec
+#   curl -s localhost:6060/metrics | grep 'name="mail/'
+# Field assumptions: the syslog parser sets evt.Parsed.program / evt.Parsed.message.
 #
 name: custom/mail-flow
-description: "Classify Postfix/Dovecot mail events into mail/<category> nodes"
-filter: "evt.Parsed.program != '' && (evt.Parsed.program startsWith 'postfix/' || evt.Parsed.program == 'dovecot')"
+description: "Classify Postfix mail events into mail/<category> message-accounting nodes"
+filter: "evt.Parsed.program != '' && evt.Parsed.program startsWith 'postfix/'"
 nodes:
-  - name: mail/rejected
-    filter: "evt.Parsed.program endsWith '/smtpd' && evt.Parsed.message contains 'NOQUEUE: reject'"
-    statics:
-      - meta: mail_category
-        value: rejected
-  - name: mail/auth-fail
-    filter: "evt.Parsed.message contains 'authentication failed' || (evt.Parsed.program == 'dovecot' && evt.Parsed.message contains 'auth failed')"
-    statics:
-      - meta: mail_category
-        value: auth-fail
-  - name: mail/spam
-    filter: "evt.Parsed.program endsWith '/smtpd' && (evt.Parsed.message contains 'lost connection after' || evt.Parsed.message contains 'non-SMTP command')"
-    statics:
-      - meta: mail_category
-        value: spam
-  # mailgraph "received" = a message entered the queue (one cleanup message-id per message).
+  # mailgraph "received" = a message was queued (one qmgr from= line per message).
   - name: mail/received
-    filter: "evt.Parsed.program endsWith '/cleanup' && evt.Parsed.message contains 'message-id='"
+    filter: "evt.Parsed.program endsWith '/qmgr' && evt.Parsed.message contains 'from=<' && evt.Parsed.message contains 'nrcpt='"
     statics:
       - meta: mail_category
         value: received
-  # mailgraph "sent" = a message was delivered (to a local mailbox or a remote MX).
+  # mailgraph "sent" = a message was delivered (local mailbox or remote MX), per recipient.
   - name: mail/sent
     filter: "evt.Parsed.message contains 'status=sent'"
     statics:
@@ -62,6 +51,26 @@ nodes:
     statics:
       - meta: mail_category
         value: deferred
+  # Refused messages (NOQUEUE/cleanup reject). Excludes 'reject_warning:'.
+  - name: mail/rejected
+    filter: "(evt.Parsed.program endsWith '/smtpd' || evt.Parsed.program endsWith '/cleanup') && evt.Parsed.message contains 'reject: '"
+    statics:
+      - meta: mail_category
+        value: rejected
+
+  # --- OPTIONAL: content spam/virus (only if you run amavis/SpamAssassin) -----
+  # Uncomment to add mailgraph-style content categories. Harmless if you have no
+  # amavis lines (the nodes just never fire). Add 'spam'/'virus' to taste.
+  # - name: mail/spam
+  #   filter: "evt.Parsed.program contains 'amavis' && (evt.Parsed.message contains 'Blocked SPAM' || evt.Parsed.message contains 'Passed SPAM')"
+  #   statics:
+  #     - meta: mail_category
+  #       value: spam
+  # - name: mail/virus
+  #   filter: "evt.Parsed.program contains 'amavis' && evt.Parsed.message contains 'INFECTED'"
+  #   statics:
+  #     - meta: mail_category
+  #       value: virus
 
   # --- recipient capture (for the dictionary-attack scenario) ----------------
   # Not a mail/* node, so it is NOT ingested as volume — it only enriches meta.
