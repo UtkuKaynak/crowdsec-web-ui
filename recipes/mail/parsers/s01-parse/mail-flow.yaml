@@ -8,6 +8,11 @@
 # a per-node counter `cs_node_hits_ok_total{name="mail/..."}` for each, which the
 # Web UI scrapes into the mail-flow volume chart.
 #
+# MUST live in s01-parse (NOT s02-enrich): the hub postfix parser only matches
+# smtpd lines, so delivery lines (qmgr from=, smtp status=...) are unparsed and
+# dropped at the end of s01 before s02 runs. Running here lets us observe (and
+# count) them while the events are still alive.
+#
 # NODE-NAME CONTRACT (the Web UI keys off these exact names) — same source lines
 # mailgraph uses:
 #   mail/received   <- postfix/qmgr  "<qid>: from=<...>, size=..., nrcpt=..."  (queued message)
