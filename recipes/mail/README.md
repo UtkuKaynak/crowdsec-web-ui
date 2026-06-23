@@ -43,10 +43,16 @@ attacks are *connection/attack* signals, not message accounting — they show up
 the Mail page's **attacks by scenario** panel (and the scenarios below), so the
 mail-flow chart stays a clean mailgraph-style message count.
 
+> **Upgrading from an earlier version?** The parser moved from `s02-enrich` to
+> `s01-parse` (delivery/queue lines are dropped before s02, so only `rejected`
+> showed up). Remove the old copy first:
+> `sudo rm -f /etc/crowdsec/parsers/s02-enrich/mail-flow.yaml`
+
 ## Install
 
 ```bash
 # 1. Copy parser + scenarios into the CrowdSec config tree
+#    (the parser goes to parsers/s01-parse/ — see the structure under parsers/)
 sudo cp -r parsers/*   /etc/crowdsec/parsers/
 sudo cp scenarios/*.yaml /etc/crowdsec/scenarios/
 
