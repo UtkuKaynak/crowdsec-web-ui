@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    AreaChart,
-    Area,
+    BarChart,
+    Bar,
     LineChart,
     Line,
     XAxis,
@@ -18,6 +18,7 @@ import { useI18n } from '../lib/i18n';
 import type { MetricsOverviewResponse, MetricSeries, MetricsResolution } from '../types';
 
 type RangeOption = '24h' | '7d' | '30d' | '90d' | '365d' | '730d';
+type ViewMode = 'total' | 'rate';
 
 const RANGE_OPTIONS: RangeOption[] = ['24h', '7d', '30d', '90d', '365d', '730d'];
 const MAIL_SCENARIO_RE = /postfix|dovecot|smtp|sasl|mail|imap|exim/i;
@@ -30,19 +31,22 @@ const CATEGORY_COLORS: Record<string, string> = {
     spam: '#a855f7',
     virus: '#7c3aed',
 };
-// Headline categories first (mailgraph order), then the rest.
 const CATEGORY_ORDER = ['received', 'sent', 'rejected', 'bounced', 'deferred', 'spam', 'virus'];
 const FALLBACK_COLORS = ['#6366f1', '#3b82f6', '#14b8a6', '#8b5cf6', '#f97316'];
+const ATTACK_COLORS = ['#ef4444', '#f59e0b', '#6366f1', '#a855f7', '#3b82f6', '#14b8a6'];
+
+const mailCategory = (dimension: string) => dimension.replace(/^mail\//, '');
 const prettyCategory = (category: string) => category.charAt(0).toUpperCase() + category.slice(1).replace(/-/g, ' ');
+const bucketMinutes = (resolution: MetricsResolution) => (resolution === 'minute' ? 1 : resolution === 'hour' ? 60 : 1440);
+const formatTotal = (value: number) => Math.round(value).toLocaleString();
+const formatValue = (value: number, view: ViewMode) =>
+    view === 'rate' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : formatTotal(value);
+
 const orderCategories = (categories: string[]) =>
     [...categories].sort((a, b) => {
         const ai = CATEGORY_ORDER.indexOf(a); const bi = CATEGORY_ORDER.indexOf(b);
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
-const ATTACK_COLORS = ['#ef4444', '#f59e0b', '#6366f1', '#a855f7', '#3b82f6', '#14b8a6'];
-
-const formatCount = (value: number) => Math.round(value).toLocaleString();
-const mailCategory = (dimension: string) => dimension.replace(/^mail\//, '');
 
 function formatBucket(ts: string, resolution: MetricsResolution): string {
     const date = new Date(ts);
@@ -58,7 +62,9 @@ interface ChartRow {
     [key: string]: number | string;
 }
 
-function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (dimension: string) => string, resolution: MetricsResolution): ChartRow[] {
+/** Pivot dimensions → rows keyed by bucket, scaling to per-minute rate when asked. */
+function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (dimension: string) => string, resolution: MetricsResolution, view: ViewMode): ChartRow[] {
+    const scale = view === 'rate' ? 1 / bucketMinutes(resolution) : 1;
     const byTs = new Map<string, ChartRow>();
     for (const entry of dimensions) {
         const key = keyOf(entry.dimension);
@@ -69,7 +75,7 @@ function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (d
                 row = { ts: point.ts, label: formatBucket(point.ts, resolution) };
                 byTs.set(point.ts, row);
             }
-            row[key] = ((row[key] as number) ?? 0) + point.value;
+            row[key] = ((row[key] as number) ?? 0) + point.value * scale;
         }
     }
     const rows = Array.from(byTs.values()).sort((a, b) => a.ts.localeCompare(b.ts));
@@ -77,9 +83,10 @@ function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (d
     return rows;
 }
 
-function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number | string; color?: string }>; label?: string }) {
+function ChartTooltip({ active, payload, label, view }: { active?: boolean; payload?: readonly { name?: string; value?: number | string; color?: string }[]; label?: string; view: ViewMode }) {
     if (!active || !payload || payload.length === 0) return null;
-    const sorted = [...payload].sort((a, b) => Number(b.value ?? 0) - Number(a.value ?? 0));
+    const sorted = [...payload].filter((e) => Number(e.value ?? 0) > 0).sort((a, b) => Number(b.value ?? 0) - Number(a.value ?? 0));
+    if (sorted.length === 0) return null;
     return (
         <div className="bg-white dark:bg-gray-800 p-3 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg max-w-xs">
             <p className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">{label}</p>
@@ -89,7 +96,7 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
                         <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color }} />
                         <span className="truncate">{entry.name}</span>
                     </span>
-                    <span className="font-mono text-gray-700 dark:text-gray-200">{formatCount(Number(entry.value ?? 0))}</span>
+                    <span className="font-mono text-gray-700 dark:text-gray-200">{formatValue(Number(entry.value ?? 0), view)}</span>
                 </div>
             ))}
         </div>
@@ -98,7 +105,7 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 
 const categoryColor = (category: string, index: number) => CATEGORY_COLORS[category] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length];
 
-function MailFlowPanel({ series, resolution }: { series: MetricSeries | undefined; resolution: MetricsResolution }) {
+function MailFlowPanel({ series, resolution, view }: { series: MetricSeries | undefined; resolution: MetricsResolution; view: ViewMode }) {
     const { t } = useI18n();
 
     const categories = useMemo(() => {
@@ -117,8 +124,8 @@ function MailFlowPanel({ series, resolution }: { series: MetricSeries | undefine
     }, [series]);
 
     const rows = useMemo(
-        () => pivot(series?.dimensions ?? [], categories, mailCategory, resolution),
-        [series, categories, resolution],
+        () => pivot(series?.dimensions ?? [], categories, mailCategory, resolution, view),
+        [series, categories, resolution, view],
     );
 
     return (
@@ -142,22 +149,22 @@ function MailFlowPanel({ series, resolution }: { series: MetricSeries | undefine
                                         <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: categoryColor(category, index) }} />
                                         {prettyCategory(category)}
                                     </div>
-                                    <div className="text-lg font-bold text-gray-900 dark:text-gray-100">{formatCount(totals.get(category) ?? 0)}</div>
+                                    <div className="text-lg font-bold text-gray-900 dark:text-gray-100">{formatTotal(totals.get(category) ?? 0)}</div>
                                 </div>
                             ))}
                         </div>
                         <div className="h-[240px]">
                             <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
-                                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                                    <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={32} />
-                                    <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={formatCount} />
-                                    <Tooltip content={<ChartTooltip />} />
+                                <BarChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} vertical={false} />
+                                    <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={24} />
+                                    <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={(v) => formatValue(v, view)} allowDecimals={view === 'rate'} />
+                                    <Tooltip content={<ChartTooltip view={view} />} cursor={{ fill: 'currentColor', opacity: 0.06 }} />
                                     {categories.map((category, index) => (
-                                        <Area key={category} type="monotone" dataKey={category} name={prettyCategory(category)} stackId="1"
-                                            stroke={categoryColor(category, index)} fill={categoryColor(category, index)} fillOpacity={0.5} isAnimationActive={false} />
+                                        <Bar key={category} dataKey={category} name={prettyCategory(category)} stackId="1"
+                                            fill={categoryColor(category, index)} isAnimationActive={false} />
                                     ))}
-                                </AreaChart>
+                                </BarChart>
                             </ResponsiveContainer>
                         </div>
                     </>
@@ -167,7 +174,7 @@ function MailFlowPanel({ series, resolution }: { series: MetricSeries | undefine
     );
 }
 
-function AttacksPanel({ series, resolution }: { series: MetricSeries | undefined; resolution: MetricsResolution }) {
+function AttacksPanel({ series, resolution, view }: { series: MetricSeries | undefined; resolution: MetricsResolution; view: ViewMode }) {
     const { t } = useI18n();
     const mailScenarios = useMemo(
         () => (series?.dimensions ?? []).filter((entry) => MAIL_SCENARIO_RE.test(entry.dimension)).slice(0, 6),
@@ -175,8 +182,8 @@ function AttacksPanel({ series, resolution }: { series: MetricSeries | undefined
     );
     const names = useMemo(() => mailScenarios.map((entry) => entry.dimension), [mailScenarios]);
     const rows = useMemo(
-        () => pivot(mailScenarios, names, (dimension) => dimension, resolution),
-        [mailScenarios, names, resolution],
+        () => pivot(mailScenarios, names, (dimension) => dimension, resolution, view),
+        [mailScenarios, names, resolution, view],
     );
 
     return (
@@ -198,10 +205,10 @@ function AttacksPanel({ series, resolution }: { series: MetricSeries | undefined
                                 <LineChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
                                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                                     <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={32} />
-                                    <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={formatCount} />
-                                    <Tooltip content={<ChartTooltip />} />
+                                    <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={(v) => formatValue(v, view)} allowDecimals={view === 'rate'} />
+                                    <Tooltip content={<ChartTooltip view={view} />} />
                                     {names.map((name, index) => (
-                                        <Line key={name} type="monotone" dataKey={name} name={name} stroke={ATTACK_COLORS[index % ATTACK_COLORS.length]} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                                        <Line key={name} type="linear" dataKey={name} name={name} stroke={ATTACK_COLORS[index % ATTACK_COLORS.length]} strokeWidth={1.5} dot={false} isAnimationActive={false} />
                                     ))}
                                 </LineChart>
                             </ResponsiveContainer>
@@ -217,7 +224,7 @@ function AttacksPanel({ series, resolution }: { series: MetricSeries | undefined
                                                     <span className="truncate text-gray-700 dark:text-gray-300" title={entry.dimension}>{entry.dimension}</span>
                                                 </span>
                                             </td>
-                                            <td className="py-1.5 text-right font-mono text-gray-600 dark:text-gray-300">{formatCount(entry.total)}</td>
+                                            <td className="py-1.5 text-right font-mono text-gray-600 dark:text-gray-300">{formatTotal(entry.total)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -234,6 +241,7 @@ export function Mail() {
     const { t } = useI18n();
     const { refreshSignal } = useRefresh();
     const [range, setRange] = useState<RangeOption>('24h');
+    const [view, setView] = useState<ViewMode>('total');
     const [data, setData] = useState<MetricsOverviewResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
 
@@ -265,13 +273,23 @@ export function Mail() {
         <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-gray-500 dark:text-gray-400">{t('pages.mail.description')}</p>
-                <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.mail.rangeAria')}>
-                    {RANGE_OPTIONS.map((option) => (
-                        <button key={option} type="button" onClick={() => setRange(option)}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${range === option ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}>
-                            {t(`pages.mail.range.${option}`)}
-                        </button>
-                    ))}
+                <div className="flex items-center gap-2">
+                    <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.mail.viewAria')}>
+                        {(['total', 'rate'] as ViewMode[]).map((option) => (
+                            <button key={option} type="button" onClick={() => setView(option)}
+                                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${view === option ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}>
+                                {t(`pages.mail.view.${option}`)}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.mail.rangeAria')}>
+                        {RANGE_OPTIONS.map((option) => (
+                            <button key={option} type="button" onClick={() => setRange(option)}
+                                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${range === option ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}>
+                                {t(`pages.mail.range.${option}`)}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </div>
 
@@ -288,8 +306,8 @@ export function Mail() {
                 </div>
             )}
 
-            <AttacksPanel series={attacks} resolution={resolution} />
-            <MailFlowPanel series={mailFlow} resolution={resolution} />
+            <AttacksPanel series={attacks} resolution={resolution} view={view} />
+            <MailFlowPanel series={mailFlow} resolution={resolution} view={view} />
         </div>
     );
 }

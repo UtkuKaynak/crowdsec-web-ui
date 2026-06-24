@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+    BarChart,
+    Bar,
     LineChart,
     Line,
     XAxis,
@@ -16,22 +18,29 @@ import { useI18n } from '../lib/i18n';
 import type { MetricsOverviewResponse, MetricSeries, MetricsResolution } from '../types';
 
 type RangeOption = '24h' | '7d' | '30d' | '90d' | '365d' | '730d';
+type ViewMode = 'total' | 'rate';
 
 const RANGE_OPTIONS: RangeOption[] = ['24h', '7d', '30d', '90d', '365d', '730d'];
 const MAX_CHART_LINES = 6;
 const SERIES_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6'];
+
+const bucketMinutes = (resolution: MetricsResolution) => (resolution === 'minute' ? 1 : resolution === 'hour' ? 60 : 1440);
+const formatValue = (value: number, view: ViewMode) =>
+    view === 'rate' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : Math.round(value).toLocaleString();
 
 interface PanelMeta {
     metric: string;
     titleKey: string;
     helpKey: string;
     icon: typeof Activity;
+    chart: 'bars' | 'lines';
 }
 
 const PANELS: PanelMeta[] = [
-    { metric: 'parser_ok', titleKey: 'pages.metrics.trafficTitle', helpKey: 'pages.metrics.trafficHelp', icon: Activity },
-    { metric: 'bucket_overflow', titleKey: 'pages.metrics.attacksTitle', helpKey: 'pages.metrics.attacksHelp', icon: ShieldAlert },
-    { metric: 'parser_ko', titleKey: 'pages.metrics.coverageTitle', helpKey: 'pages.metrics.coverageHelp', icon: AlertTriangle },
+    // Volume-by-source → stacked bars (total + composition). Attack events → lines (per-scenario spikes).
+    { metric: 'parser_ok', titleKey: 'pages.metrics.trafficTitle', helpKey: 'pages.metrics.trafficHelp', icon: Activity, chart: 'bars' },
+    { metric: 'bucket_overflow', titleKey: 'pages.metrics.attacksTitle', helpKey: 'pages.metrics.attacksHelp', icon: ShieldAlert, chart: 'lines' },
+    { metric: 'parser_ko', titleKey: 'pages.metrics.coverageTitle', helpKey: 'pages.metrics.coverageHelp', icon: AlertTriangle, chart: 'bars' },
 ];
 
 const formatCount = (value: number) => Math.round(value).toLocaleString();
@@ -63,7 +72,8 @@ interface ChartRow {
     [dimension: string]: number | string;
 }
 
-function buildChartRows(series: MetricSeries, dimensions: string[], resolution: MetricsResolution): ChartRow[] {
+function buildChartRows(series: MetricSeries, dimensions: string[], resolution: MetricsResolution, view: ViewMode): ChartRow[] {
+    const scale = view === 'rate' ? 1 / bucketMinutes(resolution) : 1;
     const byTs = new Map<string, ChartRow>();
     const keep = new Set(dimensions);
     for (const entry of series.dimensions) {
@@ -74,7 +84,7 @@ function buildChartRows(series: MetricSeries, dimensions: string[], resolution: 
                 row = { ts: point.ts, label: formatBucket(point.ts, resolution) };
                 byTs.set(point.ts, row);
             }
-            row[entry.dimension] = point.value;
+            row[entry.dimension] = point.value * scale;
         }
     }
     const rows = Array.from(byTs.values()).sort((left, right) => left.ts.localeCompare(right.ts));
@@ -93,7 +103,7 @@ interface MetricsTooltipEntry {
     color?: string;
 }
 
-function MetricsTooltip({ active, payload, label }: { active?: boolean; payload?: MetricsTooltipEntry[]; label?: string }) {
+function MetricsTooltip({ active, payload, label, view }: { active?: boolean; payload?: readonly MetricsTooltipEntry[]; label?: string; view: ViewMode }) {
     if (!active || !payload || payload.length === 0) return null;
     const sorted = [...payload].sort((a, b) => Number(b.value ?? 0) - Number(a.value ?? 0));
     return (
@@ -105,14 +115,14 @@ function MetricsTooltip({ active, payload, label }: { active?: boolean; payload?
                         <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color }} />
                         <span className="truncate">{prettifyDimension(entry.name || '')}</span>
                     </span>
-                    <span className="font-mono text-gray-700 dark:text-gray-200">{formatCount(Number(entry.value ?? 0))}</span>
+                    <span className="font-mono text-gray-700 dark:text-gray-200">{formatValue(Number(entry.value ?? 0), view)}</span>
                 </div>
             ))}
         </div>
     );
 }
 
-function MetricPanel({ meta, series, resolution }: { meta: PanelMeta; series: MetricSeries | undefined; resolution: MetricsResolution }) {
+function MetricPanel({ meta, series, resolution, view }: { meta: PanelMeta; series: MetricSeries | undefined; resolution: MetricsResolution; view: ViewMode }) {
     const { t } = useI18n();
     const Icon = meta.icon;
 
@@ -121,8 +131,8 @@ function MetricPanel({ meta, series, resolution }: { meta: PanelMeta; series: Me
         [series],
     );
     const rows = useMemo(
-        () => (series ? buildChartRows(series, topDimensions, resolution) : []),
-        [series, topDimensions, resolution],
+        () => (series ? buildChartRows(series, topDimensions, resolution, view) : []),
+        [series, topDimensions, resolution, view],
     );
 
     const hasData = (series?.dimensions.length ?? 0) > 0;
@@ -145,24 +155,37 @@ function MetricPanel({ meta, series, resolution }: { meta: PanelMeta; series: Me
                     <div className="flex flex-col lg:flex-row gap-4">
                         <div className="flex-1 min-w-0 h-[260px]">
                             <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
-                                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                                    <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={32} />
-                                    <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={formatCount} />
-                                    <Tooltip content={<MetricsTooltip />} />
-                                    {topDimensions.map((dimension, index) => (
-                                        <Line
-                                            key={dimension}
-                                            type="monotone"
-                                            dataKey={dimension}
-                                            name={dimension}
-                                            stroke={SERIES_COLORS[index % SERIES_COLORS.length]}
-                                            strokeWidth={1.5}
-                                            dot={false}
-                                            isAnimationActive={false}
-                                        />
-                                    ))}
-                                </LineChart>
+                                {meta.chart === 'bars' ? (
+                                    <BarChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} vertical={false} />
+                                        <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={24} />
+                                        <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={(v) => formatValue(v, view)} allowDecimals={view === 'rate'} />
+                                        <Tooltip content={<MetricsTooltip view={view} />} cursor={{ fill: 'currentColor', opacity: 0.06 }} />
+                                        {topDimensions.map((dimension, index) => (
+                                            <Bar key={dimension} dataKey={dimension} name={dimension} stackId="1"
+                                                fill={SERIES_COLORS[index % SERIES_COLORS.length]} isAnimationActive={false} />
+                                        ))}
+                                    </BarChart>
+                                ) : (
+                                    <LineChart data={rows} margin={{ top: 8, right: 16, left: 4, bottom: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                                        <XAxis dataKey="label" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} minTickGap={32} />
+                                        <YAxis stroke="#888888" fontSize={11} tickLine={false} axisLine={false} width={48} tickFormatter={(v) => formatValue(v, view)} allowDecimals={view === 'rate'} />
+                                        <Tooltip content={<MetricsTooltip view={view} />} />
+                                        {topDimensions.map((dimension, index) => (
+                                            <Line
+                                                key={dimension}
+                                                type="linear"
+                                                dataKey={dimension}
+                                                name={dimension}
+                                                stroke={SERIES_COLORS[index % SERIES_COLORS.length]}
+                                                strokeWidth={1.5}
+                                                dot={false}
+                                                isAnimationActive={false}
+                                            />
+                                        ))}
+                                    </LineChart>
+                                )}
                             </ResponsiveContainer>
                         </div>
                         <div className="lg:w-56 flex-shrink-0">
@@ -198,6 +221,7 @@ export function Metrics() {
     const { t } = useI18n();
     const { refreshSignal } = useRefresh();
     const [range, setRange] = useState<RangeOption>('24h');
+    const [view, setView] = useState<ViewMode>('total');
     const [data, setData] = useState<MetricsOverviewResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -231,19 +255,29 @@ export function Metrics() {
         <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-gray-500 dark:text-gray-400">{t('pages.metrics.description')}</p>
-                <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.metrics.rangeAria')}>
-                    {RANGE_OPTIONS.map((option) => (
-                        <button
-                            key={option}
-                            type="button"
-                            onClick={() => setRange(option)}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${range === option
-                                ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm'
-                                : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}
-                        >
-                            {t(`pages.metrics.range.${option}`)}
-                        </button>
-                    ))}
+                <div className="flex items-center gap-2">
+                    <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.metrics.viewAria')}>
+                        {(['total', 'rate'] as ViewMode[]).map((option) => (
+                            <button key={option} type="button" onClick={() => setView(option)}
+                                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${view === option ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm' : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}>
+                                {t(`pages.metrics.view.${option}`)}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex p-1 bg-gray-100 dark:bg-gray-800 rounded-lg" role="group" aria-label={t('pages.metrics.rangeAria')}>
+                        {RANGE_OPTIONS.map((option) => (
+                            <button
+                                key={option}
+                                type="button"
+                                onClick={() => setRange(option)}
+                                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${range === option
+                                    ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm'
+                                    : 'text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'}`}
+                            >
+                                {t(`pages.metrics.range.${option}`)}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </div>
 
@@ -272,7 +306,7 @@ export function Metrics() {
             {data && data.enabled && (
                 <div className="space-y-6">
                     {PANELS.map((panel) => (
-                        <MetricPanel key={panel.metric} meta={panel} series={seriesByMetric.get(panel.metric)} resolution={data.resolution} />
+                        <MetricPanel key={panel.metric} meta={panel} series={seriesByMetric.get(panel.metric)} resolution={data.resolution} view={view} />
                     ))}
                 </div>
             )}
