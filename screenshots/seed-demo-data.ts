@@ -490,7 +490,7 @@ function seedMetrics(): void {
     { metric: 'bucket_overflow', dimension: 'crowdsecurity/dovecot-spam', basePerHour: 3 },
     // mail_flow — mail-flow classifier (message accounting, mailgraph-style).
     { metric: 'mail_flow', dimension: 'mail/received', basePerHour: 360 },
-    { metric: 'mail_flow', dimension: 'mail/sent', basePerHour: 320 },
+    { metric: 'mail_flow', dimension: 'mail/sent', basePerHour: 20 },
     { metric: 'mail_flow', dimension: 'mail/rejected', basePerHour: 55 },
     { metric: 'mail_flow', dimension: 'mail/bounced', basePerHour: 12 },
     { metric: 'mail_flow', dimension: 'mail/deferred', basePerHour: 7 },

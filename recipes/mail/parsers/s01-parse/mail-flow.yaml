@@ -16,7 +16,7 @@
 # NODE-NAME CONTRACT (the Web UI keys off these exact names) — same source lines
 # mailgraph uses:
 #   mail/received   <- postfix/qmgr  "<qid>: from=<...>, size=..., nrcpt=..."  (queued message)
-#   mail/sent       <- delivery agent "status=sent"      (delivered, per recipient)
+#   mail/sent       <- postfix/smtp  "status=sent"  (OUTBOUND delivery to a remote MX only)
 #   mail/bounced    <- delivery agent "status=bounced"
 #   mail/deferred   <- delivery agent "status=deferred"
 #   mail/rejected   <- postfix/smtpd|cleanup "reject: "  (refused message)
@@ -40,9 +40,13 @@ nodes:
     statics:
       - meta: mail_category
         value: received
-  # mailgraph "sent" = a message was delivered (local mailbox or remote MX), per recipient.
+  # mailgraph "sent" = OUTBOUND only: a message your server delivered to a remote MX
+  # via postfix/smtp. Local mailbox deliveries of *received* mail (postfix/lmtp,
+  # /local, /virtual, or relay=dovecot) are NOT "sent" — counting them makes "sent"
+  # track "received". If you run a content filter (amavis) that postfix/smtp hands
+  # off to on 127.0.0.1, add `&& !(... contains 'relay=127.0.0.1')` to exclude it.
   - name: mail/sent
-    filter: "evt.Parsed.message contains 'status=sent'"
+    filter: "evt.Parsed.program endsWith '/smtp' && evt.Parsed.message contains 'status=sent'"
     statics:
       - meta: mail_category
         value: sent

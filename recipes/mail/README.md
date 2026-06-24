@@ -30,7 +30,7 @@ mail/received   mail/sent   mail/rejected   mail/bounced   mail/deferred
 | Node | Source line | Meaning |
 | --- | --- | --- |
 | `mail/received` | `postfix/qmgr … from=<…>, nrcpt=…` | message queued |
-| `mail/sent` | delivery agent `status=sent` | delivered (per recipient) |
+| `mail/sent` | `postfix/smtp … status=sent` | delivered **outbound** to a remote MX (local mailbox deliveries are not counted, matching mailgraph) |
 | `mail/bounced` | `status=bounced` | hard delivery failure |
 | `mail/deferred` | `status=deferred` | temporary delivery failure |
 | `mail/rejected` | `postfix/smtpd\|cleanup … reject:` | message refused |
