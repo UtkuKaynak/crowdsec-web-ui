@@ -29,7 +29,7 @@ mail/received   mail/sent   mail/rejected   mail/bounced   mail/deferred
 
 | Node | Source line | Meaning |
 | --- | --- | --- |
-| `mail/received` | `postfix/qmgr … from=<…>, nrcpt=…` | message queued |
+| `mail/received` | `postfix/smtpd … client=` | message accepted from the network (excludes local/cron mail + bounces, matching mailgraph) |
 | `mail/sent` | `postfix/smtp … status=sent` | delivered **outbound** to a remote MX (local mailbox deliveries are not counted, matching mailgraph) |
 | `mail/bounced` | `status=bounced` | hard delivery failure |
 | `mail/deferred` | `status=deferred` | temporary delivery failure |
