@@ -15,7 +15,7 @@
 #
 # NODE-NAME CONTRACT (the Web UI keys off these exact names) — same source lines
 # mailgraph uses:
-#   mail/received   <- postfix/qmgr  "<qid>: from=<...>, size=..., nrcpt=..."  (queued message)
+#   mail/received   <- postfix/smtpd "<qid>: client=..."  (accepted FROM THE NETWORK; excludes local/cron mail)
 #   mail/sent       <- postfix/smtp  "status=sent"  (OUTBOUND delivery to a remote MX only)
 #   mail/bounced    <- delivery agent "status=bounced"
 #   mail/deferred   <- delivery agent "status=deferred"
@@ -34,9 +34,11 @@ name: custom/mail-flow
 description: "Classify Postfix mail events into mail/<category> message-accounting nodes"
 filter: "evt.Parsed.program != '' && evt.Parsed.program startsWith 'postfix/'"
 nodes:
-  # mailgraph "received" = a message was queued (one qmgr from= line per message).
+  # mailgraph "received" = a message accepted FROM THE NETWORK (one smtpd client= line
+  # per message). Excludes locally-injected mail (cron/pickup) and bounce notifications,
+  # which the qmgr from= line would also catch.
   - name: mail/received
-    filter: "evt.Parsed.program endsWith '/qmgr' && evt.Parsed.message contains 'from=<' && evt.Parsed.message contains 'nrcpt='"
+    filter: "evt.Parsed.program endsWith '/smtpd' && evt.Parsed.message contains 'client='"
     statics:
       - meta: mail_category
         value: received
