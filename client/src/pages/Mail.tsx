@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card'
 import { fetchMetricsOverview } from '../lib/api';
 import { useRefresh } from '../contexts/useRefresh';
 import { useI18n } from '../lib/i18n';
+import { finalizeRows } from '../lib/chartUtils';
 import type { MetricsOverviewResponse, MetricSeries, MetricsResolution } from '../types';
 
 type RangeOption = '24h' | '7d' | '30d' | '90d' | '365d' | '730d';
@@ -37,7 +38,6 @@ const ATTACK_COLORS = ['#ef4444', '#f59e0b', '#6366f1', '#a855f7', '#3b82f6', '#
 
 const mailCategory = (dimension: string) => dimension.replace(/^mail\//, '');
 const prettyCategory = (category: string) => category.charAt(0).toUpperCase() + category.slice(1).replace(/-/g, ' ');
-const bucketMinutes = (resolution: MetricsResolution) => (resolution === 'minute' ? 1 : resolution === 'hour' ? 60 : 1440);
 const formatTotal = (value: number) => Math.round(value).toLocaleString();
 const formatValue = (value: number, view: ViewMode) =>
     view === 'rate' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : formatTotal(value);
@@ -62,9 +62,8 @@ interface ChartRow {
     [key: string]: number | string;
 }
 
-/** Pivot dimensions → rows keyed by bucket, scaling to per-minute rate when asked. */
-function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (dimension: string) => string, resolution: MetricsResolution, view: ViewMode): ChartRow[] {
-    const scale = view === 'rate' ? 1 / bucketMinutes(resolution) : 1;
+/** Pivot dimensions → raw count rows keyed by bucket (scaling/downsampling is done by finalizeRows). */
+function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (dimension: string) => string, resolution: MetricsResolution): ChartRow[] {
     const byTs = new Map<string, ChartRow>();
     for (const entry of dimensions) {
         const key = keyOf(entry.dimension);
@@ -75,7 +74,7 @@ function pivot(dimensions: MetricSeries['dimensions'], keys: string[], keyOf: (d
                 row = { ts: point.ts, label: formatBucket(point.ts, resolution) };
                 byTs.set(point.ts, row);
             }
-            row[key] = ((row[key] as number) ?? 0) + point.value * scale;
+            row[key] = ((row[key] as number) ?? 0) + point.value;
         }
     }
     const rows = Array.from(byTs.values()).sort((a, b) => a.ts.localeCompare(b.ts));
@@ -124,7 +123,7 @@ function MailFlowPanel({ series, resolution, view }: { series: MetricSeries | un
     }, [series]);
 
     const rows = useMemo(
-        () => pivot(series?.dimensions ?? [], categories, mailCategory, resolution, view),
+        () => finalizeRows(pivot(series?.dimensions ?? [], categories, mailCategory, resolution), categories, resolution, view),
         [series, categories, resolution, view],
     );
 
@@ -182,7 +181,7 @@ function AttacksPanel({ series, resolution, view }: { series: MetricSeries | und
     );
     const names = useMemo(() => mailScenarios.map((entry) => entry.dimension), [mailScenarios]);
     const rows = useMemo(
-        () => pivot(mailScenarios, names, (dimension) => dimension, resolution, view),
+        () => finalizeRows(pivot(mailScenarios, names, (dimension) => dimension, resolution), names, resolution, view),
         [mailScenarios, names, resolution, view],
     );
 

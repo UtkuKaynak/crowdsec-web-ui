@@ -15,16 +15,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card'
 import { fetchMetricsOverview } from '../lib/api';
 import { useRefresh } from '../contexts/useRefresh';
 import { useI18n } from '../lib/i18n';
+import { finalizeRows, type ChartViewMode as ViewMode } from '../lib/chartUtils';
 import type { MetricsOverviewResponse, MetricSeries, MetricsResolution } from '../types';
 
 type RangeOption = '24h' | '7d' | '30d' | '90d' | '365d' | '730d';
-type ViewMode = 'total' | 'rate';
 
 const RANGE_OPTIONS: RangeOption[] = ['24h', '7d', '30d', '90d', '365d', '730d'];
 const MAX_CHART_LINES = 6;
 const SERIES_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6'];
 
-const bucketMinutes = (resolution: MetricsResolution) => (resolution === 'minute' ? 1 : resolution === 'hour' ? 60 : 1440);
 const formatValue = (value: number, view: ViewMode) =>
     view === 'rate' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : Math.round(value).toLocaleString();
 
@@ -72,8 +71,7 @@ interface ChartRow {
     [dimension: string]: number | string;
 }
 
-function buildChartRows(series: MetricSeries, dimensions: string[], resolution: MetricsResolution, view: ViewMode): ChartRow[] {
-    const scale = view === 'rate' ? 1 / bucketMinutes(resolution) : 1;
+function buildChartRows(series: MetricSeries, dimensions: string[], resolution: MetricsResolution): ChartRow[] {
     const byTs = new Map<string, ChartRow>();
     const keep = new Set(dimensions);
     for (const entry of series.dimensions) {
@@ -84,7 +82,7 @@ function buildChartRows(series: MetricSeries, dimensions: string[], resolution: 
                 row = { ts: point.ts, label: formatBucket(point.ts, resolution) };
                 byTs.set(point.ts, row);
             }
-            row[entry.dimension] = point.value * scale;
+            row[entry.dimension] = point.value;
         }
     }
     const rows = Array.from(byTs.values()).sort((left, right) => left.ts.localeCompare(right.ts));
@@ -131,7 +129,7 @@ function MetricPanel({ meta, series, resolution, view }: { meta: PanelMeta; seri
         [series],
     );
     const rows = useMemo(
-        () => (series ? buildChartRows(series, topDimensions, resolution, view) : []),
+        () => finalizeRows(series ? buildChartRows(series, topDimensions, resolution) : [], topDimensions, resolution, view),
         [series, topDimensions, resolution, view],
     );
 
